@@ -821,6 +821,32 @@ describe("updateSkills race under the skill's own download", () => {
     }
   });
 
+  for (const nextTargets of [[], ["codex"]]) {
+    it(`preserves target changes made while an update downloads: ${JSON.stringify(nextTargets)}`, async () => {
+      clean();
+      const realFetch = global.fetch;
+      try {
+        seed([{ ...managed("o/r:a", "a", "a"), targets: ["claude"] }]);
+        writeSkillDir(path.join(skillsDir(), "ssot", "a"));
+        skills.setSkillTargets("o/r:a", ["claude"]);
+        stubDroppingMidDownload(() => skills.setSkillTargets("o/r:a", nextTargets));
+        const result = await skills.updateSkills(["o/r:a"]);
+        assert.equal(result.updated, 1);
+        const entry = JSON.parse(fs.readFileSync(registryFile(), "utf8")).skills[0];
+        assert.deepEqual(entry.targets, nextTargets);
+        assert.equal(fs.existsSync(path.join(CLAUDE_SKILLS, "a")), false);
+        if (nextTargets.includes("codex")) {
+          assert.match(fs.readFileSync(path.join(sandboxHome, ".codex", "skills", "a", "SKILL.md"), "utf8"), /name: Foo/);
+        }
+      } finally {
+        global.fetch = realFetch;
+        clean();
+        fs.rmSync(path.join(CLAUDE_SKILLS, "a"), { force: true, recursive: true });
+        fs.rmSync(path.join(sandboxHome, ".codex", "skills", "a"), { force: true, recursive: true });
+      }
+    });
+  }
+
   it("does not clobber a same-directory replacement that landed mid-download", async () => {
     clean();
     const realFetch = global.fetch;

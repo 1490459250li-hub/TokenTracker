@@ -957,9 +957,10 @@ async function installSkill(
   if (!files.some((entry) => /(^|\/)SKILL\.md$/i.test(entry.path))) throw new Error("SKILL.md not found in selected directory");
 
   const dest = managedSkillPath(installName);
-  const temp = path.join(dataDir(), "tmp", `${installName}-${Date.now()}`);
-  removePath(temp);
-  ensureDir(temp);
+  let selectedTargets = targetIds.filter((id) => TARGETS[id]);
+  const tempRoot = path.join(dataDir(), "tmp");
+  ensureDir(tempRoot);
+  const temp = fs.mkdtempSync(path.join(tempRoot, `${installName}-`));
   try {
     for (const entry of files) {
       const relative = entry.path === sourceDir ? path.basename(entry.path) : entry.path.slice(sourceDir.length + 1);
@@ -974,8 +975,11 @@ async function installSkill(
     // meantime. Checked here because everything from this point to
     // saveRegistry() is synchronous — no await can interleave a change we would
     // then clobber.
-    if (expectExistingId && !readRegistry().skills.some((entry) => !entry.trashedAt && entry.id === expectExistingId)) {
-      throw new Error("Skill is no longer installed");
+    if (expectExistingId) {
+      const current = readRegistry().skills.find((entry) => !entry.trashedAt && entry.id === expectExistingId);
+      if (!current) throw new Error("Skill is no longer installed");
+      // Another page or API caller may have changed target intent during a download.
+      selectedTargets = (current.targets || []).filter((id) => TARGETS[id]);
     }
     removePath(dest);
     ensureDir(path.dirname(dest));
@@ -988,7 +992,6 @@ async function installSkill(
   const skillMarker = findSkillMarker(dest);
   const skillMd = skillMarker ? fs.readFileSync(skillMarker, "utf8") : "";
   const metadata = readSkillMetadata(skillMd, skill.name || installName);
-  const selectedTargets = targetIds.filter((id) => TARGETS[id]);
   const installed = {
     id: `${skill.repoOwner}/${skill.repoName}:${sourceDir}`,
     key: `${skill.repoOwner}/${skill.repoName}:${sourceDir}`,
