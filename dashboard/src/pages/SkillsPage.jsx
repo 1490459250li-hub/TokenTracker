@@ -565,7 +565,7 @@ function MySkillsView({
               variant="secondary"
               size="sm"
               className="mb-2 shrink-0"
-              disabled={busyKey === "update-all"}
+              disabled={Boolean(busyKey)}
               onClick={onUpdateAll}
             >
               {busyKey === "update-all" ? (
@@ -852,6 +852,7 @@ export function SkillsPage() {
   const [agentFilter, setAgentFilter] = useState("all");
   const [selectedSkillId, setSelectedSkillId] = useState(null);
   const [busyKey, setBusyKey] = useState("");
+  const operationInFlight = useRef(false);
   const [loading, setLoading] = useState(true);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1092,6 +1093,9 @@ export function SkillsPage() {
   }
 
   const runMutation = async (key, task) => {
+    // A ref also blocks clicks delivered before React commits the busy state.
+    if (operationInFlight.current) return;
+    operationInFlight.current = true;
     setBusyKey(key);
     setError("");
     try {
@@ -1100,6 +1104,7 @@ export function SkillsPage() {
     } catch (err) {
       setError(err?.message || copy("skills.error.generic"));
     } finally {
+      operationInFlight.current = false;
       setBusyKey("");
     }
   };
@@ -1323,7 +1328,8 @@ export function SkillsPage() {
 
   const handleSearch = async () => {
     const trimmed = query.trim();
-    if (trimmed.length < 2) return;
+    if (trimmed.length < 2 || operationInFlight.current) return;
+    operationInFlight.current = true;
     setBusyKey("search");
     setError("");
     try {
@@ -1332,6 +1338,7 @@ export function SkillsPage() {
     } catch (err) {
       setError(err?.message || copy("skills.error.generic"));
     } finally {
+      operationInFlight.current = false;
       setBusyKey("");
     }
   };

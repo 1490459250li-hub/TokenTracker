@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { copy } from "../lib/copy";
@@ -415,4 +415,33 @@ describe("SkillsPage per-row update", () => {
       expect(titles).toContain(copy("skills.toast.updated", { name: "Alpha Skill" }));
     });
   });
+  it.each(["resolve", "reject"])("blocks a row update during a bulk update and unlocks after %s", async (outcome) => {
+    let finish;
+    vi.mocked(updateSkills).mockClear();
+    vi.mocked(updateSkills).mockImplementationOnce(() => new Promise((resolve, reject) => {
+      finish = () => outcome === "reject" ? reject(new Error("Update failed")) : resolve({
+        results: [{ id: "alpha-skill", name: "Alpha Skill", ok: true }],
+        updated: 1, skipped: 0, failed: 0,
+      });
+    }));
+    const user = userEvent.setup();
+    render(<SkillsPage />);
+    await user.click(await screen.findByRole("button", {
+      name: copy("skills.update.all_action", { count: 1 }),
+    }));
+    await user.click(await screen.findByRole("button", { name: copy("skills.update.action") }));
+    await waitFor(() => expect(updateSkills).toHaveBeenCalledTimes(1));
+    await user.click(await screen.findByRole("button", {
+      name: copy("skills.row.open_details", { name: "Alpha Skill" }),
+    }));
+    const rowUpdate = await screen.findByRole("button", { name: copy("skills.update.action") });
+    await user.click(rowUpdate);
+    expect(updateSkills).toHaveBeenCalledTimes(1);
+    expect(rowUpdate).toBeDisabled();
+    await act(async () => finish());
+    await waitFor(() => expect(rowUpdate).toBeEnabled());
+    await user.click(rowUpdate);
+    await waitFor(() => expect(updateSkills).toHaveBeenCalledTimes(2));
+  });
+
 });
