@@ -586,6 +586,28 @@ describe("UsageLimitsPanel", () => {
     expect(within(group).queryByText(/^Stale/i)).not.toBeInTheDocument();
   });
 
+  it("flags Antigravity reauth ahead of the cached badge", () => {
+    render(
+      <UsageLimitsPanel
+        antigravity={{
+          configured: true,
+          error: null,
+          cached: true,
+          cached_at: "2026-07-17T12:00:00.000Z",
+          auth_action_required: "reauth",
+          primary_window: { used_percent: 24, reset_at: "2026-07-24T12:00:00.000Z" },
+        }}
+        order={["antigravity"]}
+      />,
+    );
+
+    const group = screen.getByText("Antigravity").closest("[role='button']");
+    expect(group).not.toBeNull();
+    expect(within(group).getByText(new RegExp(copy("limits.reauth.badge")))).toBeInTheDocument();
+    expect(within(group).getByText(/run `agy`/)).toBeInTheDocument();
+    expect(within(group).queryByText(/cached/i)).not.toBeInTheDocument();
+  });
+
   it("flags an expired Claude sign-in on cached bars instead of the generic stale badge", () => {
     render(
       <UsageLimitsPanel
@@ -856,5 +878,89 @@ describe("UsageLimitsPanel", () => {
     expect(screen.getByText("Cursor")).toBeInTheDocument();
     expect(screen.queryByText("Auto-renew")).not.toBeInTheDocument();
     expect(screen.queryByText("Subscription")).not.toBeInTheDocument();
+  });
+
+  it("renders Devin Daily / Weekly windows with the plan label", () => {
+    render(
+      <UsageLimitsPanel
+        devin={{
+          configured: true,
+          error: null,
+          plan_label: "Pro",
+          primary_window: {
+            used_percent: 40,
+            reset_at: "2026-09-13T08:00:00.000Z",
+            limit_window_seconds: 86400,
+          },
+          secondary_window: {
+            used_percent: 90,
+            reset_at: "2026-09-20T08:00:00.000Z",
+            limit_window_seconds: 604800,
+          },
+        }}
+        order={["devin"]}
+      />,
+    );
+
+    expect(screen.getByText("Devin Pro")).toBeInTheDocument();
+    expect(screen.getByText("Daily")).toBeInTheDocument();
+    expect(screen.getByText("Weekly")).toBeInTheDocument();
+    expect(screen.getByText("40%")).toBeInTheDocument();
+    expect(screen.getByText("90%")).toBeInTheDocument();
+  });
+
+  it("flips Devin percentages to remaining in remaining display mode", () => {
+    render(
+      <UsageLimitsPanel
+        devin={{
+          configured: true,
+          error: null,
+          primary_window: {
+            used_percent: 40,
+            reset_at: "2026-09-13T08:00:00.000Z",
+            limit_window_seconds: 86400,
+          },
+        }}
+        order={["devin"]}
+        displayMode="remaining"
+      />,
+    );
+
+    expect(screen.getByText("60%")).toBeInTheDocument();
+    expect(screen.queryByText("40%")).not.toBeInTheDocument();
+  });
+
+  it("renders no bogus Daily bar when Devin reports only the weekly window", () => {
+    render(
+      <UsageLimitsPanel
+        devin={{
+          configured: true,
+          error: null,
+          primary_window: null,
+          secondary_window: {
+            used_percent: 25,
+            reset_at: "2026-09-20T08:00:00.000Z",
+            limit_window_seconds: 604800,
+          },
+        }}
+        order={["devin"]}
+      />,
+    );
+
+    expect(screen.getByText("Devin")).toBeInTheDocument();
+    expect(screen.getByText("Weekly")).toBeInTheDocument();
+    expect(screen.getByText("25%")).toBeInTheDocument();
+    expect(screen.queryByText("Daily")).not.toBeInTheDocument();
+  });
+
+  it("shows the Devin CLI setup hint when not connected", () => {
+    render(
+      <UsageLimitsPanel devin={{ configured: false }} order={["devin"]} />,
+    );
+
+    expect(screen.getByText("Devin")).toBeInTheDocument();
+    expect(screen.getByText("Not connected")).toBeInTheDocument();
+    expect(screen.getByText("Connect Devin")).toBeInTheDocument();
+    expect(screen.getByText("devin auth login")).toBeInTheDocument();
   });
 });

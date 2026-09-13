@@ -21,6 +21,11 @@ const {
   currentCodexModel,
   snapshotCodexModelAttributionState,
 } = require("./codex-model-attribution");
+const {
+  DEVIN_TABLE_PROBE_SQL,
+  devinUsageSql,
+  buildDevinUsageEvents,
+} = require("./devin-usage");
 const { USD_TICKS_PER_USD, normalizeGrokUsage } = require("./grok-usage");
 
 const DEFAULT_SOURCE = "codex";
@@ -12900,6 +12905,395 @@ async function parseAnythingllmIncremental({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Devin (Cognition — devin.ai CLI)
+//
+// Data: SQLite at
+//   macOS/Linux: $XDG_DATA_HOME/devin/cli/sessions.db (~/.local/share)
+//   Windows:     no evidenced native location; the CLI's XDG data dir inside a
+//                WSL distro is probed via the \\wsl$ UNC bridge
+//   Override:    $TOKENTRACKER_DEVIN_DB
+//
+// Devin rewrites history aggressively: replay, compaction and forks copy
+// message_nodes rows, so several nodes share one chat_message
+// `.metadata.request_id` (verified on CLI 3000.10.21: ~2 duplicated nodes per
+// request). request_id is the billing identity — copies must not add usage.
+// Aggregation is a full projection + per-request reconcile keyed by
+// request_id: every fingerprint change re-reads the usage-only rows, the
+// ledger in cursors.devin.requests subtracts a request's prior contribution
+// before adding its current one, and deleted/compacted history keeps its
+// (non-refunded) ledger entry. There is no row_id high-water mark because
+// in-place metric corrections cannot be detected by one.
+//
+// Attribution recorded at first observation is authoritative: a request's
+// owning session, resolved project and conversation share live in the ledger,
+// so deleting the original node while a fork copy survives never migrates its
+// spend or refunds its conversation. A fork made only of copies pays nothing;
+// the first genuinely new request in a session pays its single
+// conversation_count once — the set of sessions that already paid is derived
+// from the ledger entries themselves, not persisted separately.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DEVIN_SOURCE = "devin";
+
+function resolveDevinDbPath(env = process.env, deps = {}) {
+  const override =
+    typeof env.TOKENTRACKER_DEVIN_DB === "string" && env.TOKENTRACKER_DEVIN_DB.trim();
+  if (override) return path.resolve(env.TOKENTRACKER_DEVIN_DB.trim());
+  const home = env.HOME || env.USERPROFILE || os.homedir();
+  const xdgDataHome =
+    typeof env.XDG_DATA_HOME === "string" && env.XDG_DATA_HOME.trim()
+      ? path.resolve(env.XDG_DATA_HOME.trim())
+      : path.join(home, ".local", "share");
+  if (process.platform !== "win32") {
+    return path.join(xdgDataHome, "devin", "cli", "sessions.db");
+  }
+  // Devin CLI is not known to write a native-Windows data dir; on Windows its
+  // sessions.db lives under the distro's XDG home, reachable over \\wsl$.
+  const wslDir = wsl.shouldProbeWsl(env)
+    ? wsl.discoverWslHome(".local/share/devin/cli", { ...deps, env })
+    : null;
+  const wslValue = wslDir ? path.join(wslDir, "sessions.db") : null;
+  const paths = resolveInstallPaths({ nativeValue: null, wslValue }, env, deps);
+  return paths.native || paths.wsl;
+}
+
+function devinSqliteFingerprint(dbPath) {
+  const fingerprint = sqliteSidecarFingerprint(dbPath);
+  // -shm is reader bookkeeping: opening a WAL database can bump it without any
+  // content change, so it must not force a rescan (same convention as Unsloth).
+  delete fingerprint["-shm"];
+  return fingerprint;
+}
+
+// Request ids and conversation keys are untrusted strings — normalize the
+// persisted maps into null-prototype dictionaries so a literal "__proto__"
+// key stays an own entry that round-trips through cursors.json instead of
+// silently mutating the prototype chain (and re-adding that request's usage
+// on every rescan).
+function devinStringMap(value) {
+  const dict = Object.create(null);
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const key of Object.keys(value)) dict[key] = value[key];
+  }
+  return dict;
+}
+
+// Stage only the bucket objects this parser can mutate. The shared
+// normalizers copy the bucket maps but alias each bucket/totals object, and
+// the enqueue helpers stamp queuedKey before appendFile runs — so a failed
+// append used to leave the caller's published state polluted. Only
+// devin-owned entries get private copies; every other provider's buckets
+// stay shared read-only references.
+function stageDevinBuckets(buckets, isDevinBucket) {
+  const staged = {};
+  for (const [key, bucket] of Object.entries(buckets || {})) {
+    staged[key] =
+      bucket && typeof bucket === "object" && isDevinBucket(key, bucket)
+        ? {
+            ...bucket,
+            totals:
+              bucket.totals && typeof bucket.totals === "object"
+                ? { ...bucket.totals }
+                : bucket.totals,
+          }
+        : bucket;
+  }
+  return staged;
+}
+
+async function readDevinUsageRows(dbPath, sqliteOptions = {}) {
+  if (!dbPath || !fssync.existsSync(dbPath)) return [];
+  const options = {
+    label: "Devin",
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: 30_000,
+    readOnly: true,
+    throwOnReadFailure: true,
+    ...sqliteOptions,
+  };
+  let snapshot = null;
+  let effectiveDbPath = dbPath;
+  if (isUncPath(dbPath)) {
+    try {
+      snapshot = snapshotSqliteDb(dbPath);
+      effectiveDbPath = snapshot.path;
+    } catch (_e) { }
+  }
+  try {
+    const tables = new Set(
+      (await readSqliteJsonRowsAsync(effectiveDbPath, DEVIN_TABLE_PROBE_SQL, options))
+        .map((row) => row?.name)
+        .filter(Boolean),
+    );
+    if (!tables.has("message_nodes")) return [];
+    return await readSqliteJsonRowsAsync(
+      effectiveDbPath,
+      devinUsageSql({ hasSessionsTable: tables.has("sessions") }),
+      options,
+    );
+  } finally {
+    if (snapshot) snapshot.cleanup();
+  }
+}
+
+async function parseDevinIncremental({
+  dbPath,
+  cursors,
+  queuePath,
+  projectQueuePath,
+  onProgress,
+  env,
+  sqliteOptions,
+  publicRepoResolver,
+} = {}) {
+  await ensureDir(path.dirname(queuePath));
+  const resolvedDb = dbPath || resolveDevinDbPath(env || process.env);
+  const priorState =
+    cursors.devin && typeof cursors.devin === "object" ? cursors.devin : {};
+  const requests = devinStringMap(priorState.requests);
+  if (!resolvedDb || !fssync.existsSync(resolvedDb)) {
+    const nextState = { ...priorState, requests, updatedAt: new Date().toISOString() };
+    delete nextState.conversations;
+    cursors.devin = nextState;
+    return { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0, projectBucketsQueued: 0 };
+  }
+
+  // Cheap unchanged check: skip all SQL work when neither the DB nor its WAL
+  // moved since the last published state.
+  const initialFingerprint = devinSqliteFingerprint(resolvedDb);
+  if (sameSqliteFingerprint(initialFingerprint, priorState.fingerprint)) {
+    return { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0, projectBucketsQueued: 0 };
+  }
+
+  const rows = await readDevinUsageRows(resolvedDb, sqliteOptions);
+  const { events } = buildDevinUsageEvents(rows);
+
+  // Stage the normalized working states: bucket-map copies alias the
+  // caller's published bucket objects, so give only the devin-owned entries
+  // (plus the flat groupQueued map) private copies. Reconciliation and
+  // enqueue mutations then land on staged state and are published only after
+  // both queue appends below succeed — a failed append leaves `cursors`
+  // untouched so a retry re-derives the same contribution and latest-wins
+  // rows recover either queue. Unrelated providers' buckets stay shared
+  // read-only references (this parser never writes their keys).
+  const hourlyState = normalizeHourlyState(cursors?.hourly);
+  hourlyState.buckets = stageDevinBuckets(
+    hourlyState.buckets,
+    (key) =>
+      (normalizeSourceInput(parseBucketKey(key).source) || DEFAULT_SOURCE) ===
+      DEVIN_SOURCE,
+  );
+  hourlyState.groupQueued =
+    hourlyState.groupQueued && typeof hourlyState.groupQueued === "object"
+      ? { ...hourlyState.groupQueued }
+      : {};
+  const touchedBuckets = new Set();
+  const projectEnabled =
+    typeof projectQueuePath === "string" && projectQueuePath.length > 0;
+  const projectState = projectEnabled
+    ? normalizeProjectState(cursors?.projectHourly)
+    : null;
+  if (projectState) {
+    // Project bucket keys are `projectKey|source|hourStart`; this parser only
+    // ever looks up keys whose middle segment is the devin source.
+    projectState.buckets = stageDevinBuckets(projectState.buckets, (key) => {
+      const last = key.lastIndexOf(BUCKET_SEPARATOR);
+      const prev = last > 0 ? key.lastIndexOf(BUCKET_SEPARATOR, last - 1) : -1;
+      const source = prev >= 0 ? key.slice(prev + 1, last) : "";
+      return (
+        (normalizeSourceInput(source) || DEFAULT_SOURCE) === DEVIN_SOURCE
+      );
+    });
+  }
+  const projectTouchedBuckets = projectEnabled ? new Set() : null;
+  const projectMetaCache = projectEnabled ? new Map() : null;
+  const publicRepoCache = projectEnabled ? new Map() : null;
+  const projectContextBySession = projectEnabled ? new Map() : null;
+  const cb = typeof onProgress === "function" ? onProgress : null;
+  let eventsAggregated = 0;
+
+  // The counted-conversation index is derived from the retained ledger: the
+  // entry that paid a conversation's +1 keeps that share in its own totals,
+  // even after every copy of the request vanished — no second persisted map.
+  const countedConversations = new Set();
+  for (const [requestId, entry] of Object.entries(requests)) {
+    const totals = entry && typeof entry === "object" ? entry.totals : null;
+    if (totals && Number.isSafeInteger(totals.conversation_count) && totals.conversation_count >= 1) {
+      countedConversations.add(
+        typeof entry.sessionId === "string" && entry.sessionId
+          ? entry.sessionId
+          : `request:${requestId}`,
+      );
+    }
+  }
+
+  for (let index = 0; index < events.length; index++) {
+    const event = events[index];
+    const bucketStart = toUtcHalfHourStart(new Date(event.tsMs).toISOString());
+    if (!bucketStart) continue;
+
+    const previous = requests[event.requestId];
+    const previousTotals =
+      previous?.totals && typeof previous.totals === "object" ? previous.totals : null;
+
+    // Ownership recorded at first observation is authoritative. For a known
+    // request the ledger's session/project/conversation share survive copy
+    // deletion and fork timelines; for a new request the canonical retained
+    // record supplies them exactly once.
+    let projectKey = previous ? previous.projectKey || null : null;
+    let projectRef = previous ? previous.projectRef || null : null;
+    if (previous) {
+      const priorConv = previousTotals ? previousTotals.conversation_count : 0;
+      event.totals.conversation_count =
+        Number.isSafeInteger(priorConv) && priorConv >= 0 ? priorConv : 0;
+    } else {
+      if (projectEnabled && event.sessionId) {
+        let context = projectContextBySession.get(event.sessionId);
+        if (context === undefined) {
+          const startDir = event.workingDirectory
+            ? wsl.mapWslCwdToUnc(event.workingDirectory, resolvedDb)
+            : null;
+          context = startDir
+            ? await resolveProjectContextForPath({
+                startDir,
+                projectMetaCache,
+                publicRepoCache,
+                publicRepoResolver,
+                projectState,
+              })
+            : null;
+          projectContextBySession.set(event.sessionId, context || null);
+        }
+        projectKey = context?.projectKey || null;
+        projectRef = context?.projectRef || null;
+      }
+      // A fork made only of copied requests pays no conversation of its own;
+      // the first genuinely new request in a conversation pays it once.
+      const convKey = event.sessionId || `request:${event.requestId}`;
+      if (countedConversations.has(convKey)) {
+        event.totals.conversation_count = 0;
+      } else {
+        event.totals.conversation_count = 1;
+        countedConversations.add(convKey);
+      }
+    }
+
+    const unchanged =
+      previousTotals &&
+      totalsKey(previousTotals) === totalsKey(event.totals) &&
+      previous.bucketStart === bucketStart &&
+      previous.model === event.model;
+    if (!unchanged) {
+      if (previousTotals && previous.bucketStart && previous.model) {
+        const oldBucket = getHourlyBucket(
+          hourlyState,
+          DEVIN_SOURCE,
+          previous.model,
+          previous.bucketStart,
+        );
+        subtractTotals(oldBucket.totals, previousTotals);
+        touchedBuckets.add(
+          bucketKey(DEVIN_SOURCE, previous.model, previous.bucketStart),
+        );
+        if (projectEnabled && previous.projectKey) {
+          const oldProjectBucket = getProjectBucket(
+            projectState,
+            previous.projectKey,
+            DEVIN_SOURCE,
+            previous.bucketStart,
+            previous.projectRef || null,
+          );
+          subtractTotals(oldProjectBucket.totals, previousTotals);
+          projectTouchedBuckets.add(
+            projectBucketKey(previous.projectKey, DEVIN_SOURCE, previous.bucketStart),
+          );
+        }
+      }
+
+      const bucket = getHourlyBucket(hourlyState, DEVIN_SOURCE, event.model, bucketStart);
+      addTotals(bucket.totals, event.totals);
+      touchedBuckets.add(bucketKey(DEVIN_SOURCE, event.model, bucketStart));
+      if (projectEnabled && projectKey) {
+        const projectBucket = getProjectBucket(
+          projectState,
+          projectKey,
+          DEVIN_SOURCE,
+          bucketStart,
+          projectRef,
+        );
+        addTotals(projectBucket.totals, event.totals);
+        projectTouchedBuckets.add(
+          projectBucketKey(projectKey, DEVIN_SOURCE, bucketStart),
+        );
+      }
+      // The ledger records only what was added: owning session, model,
+      // bucket, totals and the resolved project identity — never request text
+      // or raw working paths.
+      requests[event.requestId] = {
+        sessionId:
+          previous && typeof previous.sessionId === "string" && previous.sessionId
+            ? previous.sessionId
+            : event.sessionId,
+        model: event.model,
+        bucketStart,
+        totals: event.totals,
+        projectKey,
+        projectRef,
+        updatedAt: new Date().toISOString(),
+      };
+      eventsAggregated += 1;
+    }
+    if (cb) {
+      cb({
+        index: index + 1,
+        total: events.length,
+        recordsProcessed: index + 1,
+        eventsAggregated,
+        bucketsQueued: touchedBuckets.size,
+      });
+    }
+  }
+
+  const bucketsQueued = await enqueueTouchedBuckets({
+    queuePath,
+    hourlyState,
+    touchedBuckets,
+  });
+  const projectBucketsQueued = projectEnabled
+    ? await enqueueTouchedProjectBuckets({
+        projectQueuePath,
+        projectState,
+        projectTouchedBuckets,
+      })
+      : 0;
+  // If Devin wrote to the DB/WAL while we read, publish the pre-read
+  // fingerprint so the next sync re-reads instead of acknowledging a snapshot
+  // it never saw (same convention as parseUnslothIncremental).
+  const finalFingerprint = devinSqliteFingerprint(resolvedDb);
+  const updatedAt = new Date().toISOString();
+  hourlyState.updatedAt = updatedAt;
+  cursors.hourly = hourlyState;
+  cursors.devin = {
+    version: 1,
+    requests,
+    fingerprint: sameSqliteFingerprint(initialFingerprint, finalFingerprint)
+      ? finalFingerprint
+      : initialFingerprint,
+    updatedAt,
+  };
+  if (projectState) {
+    projectState.updatedAt = updatedAt;
+    cursors.projectHourly = projectState;
+  }
+  return {
+    recordsProcessed: rows.length,
+    eventsAggregated,
+    bucketsQueued,
+    projectBucketsQueued,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Goose (Block AI agent — github.com/block/goose)
 //
 // Data: SQLite at
@@ -14652,6 +15046,8 @@ async function parsePiLikeIncremental({
   sessionFiles,
   cursors,
   queuePath,
+  projectQueuePath,
+  publicRepoResolver,
   onProgress,
   env,
   defaultModel,
@@ -14661,6 +15057,7 @@ async function parsePiLikeIncremental({
   sourceForProvider,
 } = {}) {
   await ensureDir(path.dirname(queuePath));
+  const projectEnabled = typeof projectQueuePath === "string" && projectQueuePath.length > 0;
   const providerState = cursors[stateKey] && typeof cursors[stateKey] === "object"
     ? cursors[stateKey]
     : {};
@@ -14669,6 +15066,9 @@ async function parsePiLikeIncremental({
     providerState.fileOffsets && typeof providerState.fileOffsets === "object"
       ? { ...providerState.fileOffsets }
       : {};
+
+  const projectSeenIds = new Set(Array.isArray(providerState.projectSeenIds) ? providerState.projectSeenIds : []);
+  const projectFileOffsets = { ...(providerState.projectFileOffsets || {}) };
 
   const files = Array.isArray(sessionFiles)
     ? sessionFiles
@@ -14682,11 +15082,33 @@ async function parsePiLikeIncremental({
       fileOffsets,
       updatedAt: new Date().toISOString(),
     };
-    return { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    return { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0, projectBucketsQueued: 0 };
   }
 
   const hourlyState = normalizeHourlyState(cursors?.hourly);
   const touchedBuckets = new Set();
+  const projectState = projectEnabled ? normalizeProjectState(cursors?.projectHourly) : null;
+  const projectTouchedBuckets = projectEnabled ? new Set() : null;
+  const projectMetaCache = projectEnabled ? new Map() : null;
+  const publicRepoCache = projectEnabled ? new Map() : null;
+  // Both queues must publish before cursor progress is acknowledged. Normalized
+  // bucket maps still alias their values, so stage this provider's buckets to
+  // keep a failed project append from mutating the caller's aggregate state.
+  const family = sourceForProvider(null);
+  const ownsSource = (source) => source === family || source.startsWith(`${family}-`);
+  hourlyState.groupQueued = { ...(hourlyState.groupQueued || {}) };
+  for (const [key, bucket] of Object.entries(hourlyState.buckets)) {
+    if (ownsSource(parseBucketKey(key).source || "")) {
+      hourlyState.buckets[key] = { ...bucket, totals: { ...bucket.totals } };
+    }
+  }
+  if (projectState) {
+    for (const [key, bucket] of Object.entries(projectState.buckets)) {
+      if (ownsSource(bucket.source || "")) {
+        projectState.buckets[key] = { ...bucket, totals: { ...bucket.totals } };
+      }
+    }
+  }
   const cb = typeof onProgress === "function" ? onProgress : null;
   let recordsProcessed = 0;
   let eventsAggregated = 0;
@@ -14825,6 +15247,135 @@ async function parsePiLikeIncremental({
     };
   }
 
+  // Project attribution has an independent cursor so upgrading an existing
+  // installation can backfill already-consumed Pi sessions without adding
+  // those messages to the total-usage buckets a second time. Current Pi
+  // session headers persist the real cwd; unlike the encoded session folder,
+  // it is lossless even when path components contain dashes.
+  if (projectEnabled) {
+    for (const filePath of files) {
+      let stat;
+      try { stat = fssync.statSync(filePath); } catch { continue; }
+
+      const prevEntry = projectFileOffsets[filePath] || {};
+      const prevSize = Number(prevEntry.size) || 0;
+      const prevIno = prevEntry.ino;
+      const inodeChanged = typeof prevIno === "number" && prevIno !== stat.ino;
+      const startOffset = stat.size < prevSize || inodeChanged ? 0 : prevSize;
+      if (stat.size <= startOffset) continue;
+
+      const cwd = await resolveOmpFileCwd(filePath);
+      const projectContext = cwd
+        ? await resolveProjectContextForPath({
+            startDir: wsl.mapWslCwdToUnc(cwd, filePath),
+            projectMetaCache,
+            publicRepoCache,
+            publicRepoResolver,
+            projectState,
+          })
+        : null;
+      const projectRef = projectContext?.projectRef || null;
+      const projectKey = projectContext?.projectKey || null;
+
+      let lastCompleteOffset = startOffset;
+      if (projectKey && projectRef) {
+        let stream;
+        try {
+          stream = fssync.createReadStream(filePath, {
+            encoding: "utf8",
+            start: startOffset,
+          });
+        } catch {
+          continue;
+        }
+        let streamedBytes = 0;
+        stream.on("data", (chunk) => {
+          const newlineIndex = chunk.lastIndexOf("\n");
+          if (newlineIndex !== -1) {
+            lastCompleteOffset = startOffset + streamedBytes
+              + Buffer.byteLength(chunk.slice(0, newlineIndex + 1), "utf8");
+          }
+          streamedBytes += Buffer.byteLength(chunk, "utf8");
+        });
+        const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+        for await (const line of rl) {
+          if (!line || !line.trim()) continue;
+          let entry;
+          try { entry = JSON.parse(line); } catch { continue; }
+          const msg = entry?.type === "message" ? entry.message : null;
+          const usage = msg?.role === "assistant" ? msg.usage : null;
+          if (!usage || typeof usage !== "object") continue;
+
+          const entryId = typeof entry.id === "string" && entry.id ? entry.id : null;
+          if (!entryId || projectSeenIds.has(entryId)) continue;
+
+          const input = toNonNegativeInt(usage.input);
+          const output = toNonNegativeInt(usage.output);
+          const cacheRead = toNonNegativeInt(usage.cacheRead);
+          const cacheWrite = toNonNegativeInt(usage.cacheWrite);
+          const reasoningTokens = toNonNegativeInt(usage.reasoningTokens);
+          if (
+            input === 0 &&
+            output === 0 &&
+            cacheRead === 0 &&
+            cacheWrite === 0 &&
+            reasoningTokens === 0
+          ) {
+            projectSeenIds.add(entryId);
+            continue;
+          }
+
+          let tsMs = null;
+          if (Number.isFinite(Number(msg.timestamp)) && Number(msg.timestamp) > 0) {
+            tsMs = Number(msg.timestamp);
+          } else if (typeof entry.timestamp === "string" && entry.timestamp) {
+            const parsed = Date.parse(entry.timestamp);
+            if (Number.isFinite(parsed) && parsed > 0) tsMs = parsed;
+          }
+          const bucketStart = tsMs == null
+            ? null
+            : toUtcHalfHourStart(new Date(tsMs).toISOString());
+          if (!bucketStart) {
+            projectSeenIds.add(entryId);
+            continue;
+          }
+
+          const totalTokens =
+            Number.isFinite(Number(usage.totalTokens)) && Number(usage.totalTokens) > 0
+              ? toNonNegativeInt(usage.totalTokens)
+              : input + output + cacheRead + cacheWrite + reasoningTokens;
+          const delta = {
+            input_tokens: input,
+            cached_input_tokens: cacheRead,
+            cache_creation_input_tokens: cacheWrite,
+            output_tokens: output,
+            reasoning_output_tokens: reasoningTokens,
+            total_tokens: totalTokens,
+            conversation_count: 1,
+          };
+          const projectBucket = getProjectBucket(
+            projectState,
+            projectKey,
+            sourceForProvider(msg.provider),
+            bucketStart,
+            projectRef,
+          );
+          addTotals(projectBucket.totals, delta);
+          projectTouchedBuckets.add(projectBucketKey(projectKey, sourceForProvider(msg.provider), bucketStart));
+          projectSeenIds.add(entryId);
+        }
+      }
+
+      let postStat = stat;
+      try { postStat = fssync.statSync(filePath); } catch {}
+      projectFileOffsets[filePath] = {
+        size: Math.min(lastCompleteOffset, postStat.size),
+        mtimeMs: postStat.mtimeMs,
+        ino: postStat.ino,
+      };
+    }
+  }
+
   const seenArr = Array.from(seenIds);
   const cappedSeen =
     seenArr.length > 10_000 ? seenArr.slice(seenArr.length - 10_000) : seenArr;
@@ -14834,17 +15385,28 @@ async function parsePiLikeIncremental({
     hourlyState,
     touchedBuckets,
   });
+  const projectBucketsQueued = projectEnabled
+    ? await enqueueTouchedProjectBuckets({ projectQueuePath, projectState, projectTouchedBuckets })
+    : 0;
   const updatedAt = new Date().toISOString();
   hourlyState.updatedAt = updatedAt;
   cursors.hourly = hourlyState;
+  if (projectState) {
+    projectState.updatedAt = updatedAt;
+    cursors.projectHourly = projectState;
+  }
   cursors[stateKey] = {
     ...providerState,
     seenIds: cappedSeen,
     fileOffsets,
+    ...(projectEnabled ? {
+      projectSeenIds: Array.from(projectSeenIds).slice(-10_000),
+      projectFileOffsets,
+    } : {}),
     updatedAt,
   };
 
-  return { recordsProcessed, eventsAggregated, bucketsQueued };
+  return { recordsProcessed, eventsAggregated, bucketsQueued, projectBucketsQueued };
 }
 
 async function parsePiIncremental(options = {}) {
@@ -19810,9 +20372,10 @@ async function parseTraeCnApiIncremental({
 // built-in zlib zstd first, `@mongodb-js/zstd` as the Node 20 fallback —
 // enforcing a cumulative plaintext bound as we go.
 // Dedup is a per-file `lastSeq` watermark — seq
-// is monotonic within a session log, so an append-only grow re-reads the file
-// and skips everything at or below the watermark; a torn-tail repair or full
-// rewrite re-reads the same seqs and is therefore idempotent.
+// is monotonic within an append-only session log, so a grow re-reads the file
+// and skips everything at or below the watermark. Torn tails never advance the
+// watermark until their JSON record is complete; format replacements are
+// reconciled through per-session contribution ledgers.
 const DSH_SESSION_LOG_MAX_BYTES = 64 * 1024 * 1024;
 const DSH_SESSION_TEXT_MAX_BYTES = 128 * 1024 * 1024;
 const DSH_SOURCE = "dsh";
@@ -19862,13 +20425,20 @@ function resolveDshHomes(env = process.env, deps = {}) {
   return [...new Set([resolved.native, resolved.wsl].filter(Boolean))];
 }
 
+const DSH_SESSION_LOG_PATTERN = /^session(?:\.v\d+)?\.jsonl(?:\.zstd)?$/;
+
 function isDshSessionLogName(name) {
-  return name === "session.jsonl" || name === "session.jsonl.zstd";
+  return typeof name === "string" && DSH_SESSION_LOG_PATTERN.test(name);
+}
+
+function parseDshVersion(name) {
+  const match = typeof name === "string" ? name.match(/\.v(\d+)\.jsonl/) : null;
+  return match ? parseInt(match[1], 10) : 0;
 }
 
 // Walk the harness sessions root for per-session log artifacts. The tree is
-// `<sessions-root>/<project-key>/<session-id>/session.jsonl[.zstd]`; only the
-// exact leaf names are collected so unrelated harness files are ignored.
+// `<sessions-root>/<project-key>/<session-id>/session[.v3].jsonl[.zstd]`; only
+// the matching leaf names are collected so unrelated harness files are ignored.
 async function resolveDshSessionFiles(env = process.env, deps = {}) {
   const out = [];
   const seen = new Set();
@@ -19892,7 +20462,7 @@ async function resolveDshSessionFiles(env = process.env, deps = {}) {
         } else if (transcripts.length > 1) {
           // Harness itself rejects mixed encodings in one root. For a passive
           // reader, choose the actively-written artifact instead of counting the
-          // same session twice; a tie prefers the default zstd encoding.
+          // same session twice; a tie prefers the higher format version, then zstd.
           const ranked = await Promise.all(transcripts.map(async (artifact) => {
             const full = path.join(sessionDir, artifact.name);
             const handle = await fs.open(full, "r").catch(() => null);
@@ -19910,6 +20480,7 @@ async function resolveDshSessionFiles(env = process.env, deps = {}) {
           }));
           ranked.sort((left, right) =>
             right.mtimeMs - left.mtimeMs ||
+            parseDshVersion(right.name) - parseDshVersion(left.name) ||
             Number(right.name.endsWith(".zstd")) - Number(left.name.endsWith(".zstd")),
           );
           selected = ranked[0]?.full || null;
@@ -20098,6 +20669,161 @@ function sameDshSessionMetadata(previous, current) {
     previous.size === current.size &&
     previous.mtimeMs === current.mtimeMs
   );
+}
+
+function dshSessionDirectoryKey(filePath) {
+  return typeof filePath === "string" ? path.dirname(path.resolve(filePath)) : null;
+}
+
+function normalizeDshContributions(value) {
+  const normalized = {};
+  if (!value || typeof value !== "object") return normalized;
+  for (const [key, entry] of Object.entries(value)) {
+    if (!entry || typeof entry !== "object" || !entry.totals) continue;
+    const model = normalizeModelInput(entry.model);
+    const bucketStart = typeof entry.bucketStart === "string" ? entry.bucketStart : null;
+    if (!model || !bucketStart) continue;
+    normalized[key] = {
+      model,
+      bucketStart,
+      totals: cloneTotals(entry.totals),
+    };
+  }
+  return normalized;
+}
+
+function storedDshContributions(state) {
+  if (
+    !state ||
+    typeof state !== "object" ||
+    !Object.prototype.hasOwnProperty.call(state, "contributions") ||
+    !state.contributions ||
+    typeof state.contributions !== "object"
+  ) {
+    return null;
+  }
+  const normalized = normalizeDshContributions(state.contributions);
+  // A partially written or hand-edited ledger is not a safe subtraction
+  // baseline. Treat it as absent so migration defers instead of silently
+  // retracting only some of a session's contribution.
+  if (Object.keys(normalized).length !== Object.keys(state.contributions).length) {
+    return null;
+  }
+  return normalized;
+}
+
+function addDshContribution(contributions, model, bucketStart, totals) {
+  const key = bucketKey(DSH_SOURCE, model, bucketStart);
+  let contribution = contributions[key];
+  if (!contribution) {
+    contribution = {
+      model,
+      bucketStart,
+      totals: initTotals(),
+    };
+    contributions[key] = contribution;
+  }
+  addTotals(contribution.totals, totals);
+}
+
+function dshContributionsFromDeltas(deltas) {
+  const contributions = {};
+  for (const delta of deltas || []) {
+    const bucketStart = toUtcHalfHourStart(delta.timeMs);
+    if (!bucketStart || !delta.model || !delta.totals) continue;
+    addDshContribution(contributions, delta.model, bucketStart, delta.totals);
+  }
+  return contributions;
+}
+
+function legacyDshContributionsFromSnapshot(snapshot, previousState) {
+  if (
+    !snapshot?.text ||
+    !previousState ||
+    typeof previousState !== "object" ||
+    !Number.isSafeInteger(previousState.lastSeq) ||
+    previousState.lastSeq < -1 ||
+    previousState.inode !== snapshot.inode ||
+    !Number.isFinite(previousState.size) ||
+    snapshot.size < previousState.size
+  ) {
+    return null;
+  }
+  const parsed = extractDshSessionUsage(snapshot.text, -1);
+  if (!parsed.complete || parsed.sessionId !== previousState.sessionId) return null;
+  // The pre-ledger parser replayed unknown-sequence usage on every pass, so
+  // there is no safe prefix boundary for such a record. Defer instead.
+  if (parsed.deltas.some((delta) => !Number.isSafeInteger(delta.seq))) return null;
+  return dshContributionsFromDeltas(
+    parsed.deltas.filter((delta) => delta.seq <= previousState.lastSeq),
+  );
+}
+
+function dshContributionsCoverPrior(prior, candidate) {
+  for (const [key, previous] of Object.entries(prior || {})) {
+    const current = candidate?.[key];
+    if (!current?.totals || !previous?.totals) return false;
+    for (const field of [
+      "input_tokens",
+      "cached_input_tokens",
+      "cache_creation_input_tokens",
+      "output_tokens",
+      "reasoning_output_tokens",
+      "total_tokens",
+      "billable_total_tokens",
+      "total_cost_usd",
+      "conversation_count",
+    ]) {
+      const available = Number(current.totals[field] || 0);
+      const required = Number(previous.totals[field] || 0);
+      if (!Number.isFinite(available) || !Number.isFinite(required) || available < required) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function dshContributionsFitHourlyState(hourlyState, contributions) {
+  for (const contribution of Object.values(contributions || {})) {
+    if (!contribution?.model || !contribution.bucketStart || !contribution.totals) continue;
+    const key = bucketKey(DSH_SOURCE, contribution.model, contribution.bucketStart);
+    const bucket = hourlyState?.buckets?.[key];
+    if (!bucket?.totals) return false;
+    for (const field of [
+      "input_tokens",
+      "cached_input_tokens",
+      "cache_creation_input_tokens",
+      "output_tokens",
+      "reasoning_output_tokens",
+      "total_tokens",
+      "billable_total_tokens",
+      "total_cost_usd",
+      "conversation_count",
+    ]) {
+      const available = Number(bucket.totals[field] || 0);
+      const required = Number(contribution.totals[field] || 0);
+      if (!Number.isFinite(available) || !Number.isFinite(required) || available < required) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function applyDshContributions({ hourlyState, touchedBuckets, contributions, subtract = false }) {
+  for (const contribution of Object.values(contributions || {})) {
+    if (!contribution?.model || !contribution.bucketStart || !contribution.totals) continue;
+    const bucket = getHourlyBucket(
+      hourlyState,
+      DSH_SOURCE,
+      contribution.model,
+      contribution.bucketStart,
+    );
+    if (subtract) subtractTotals(bucket.totals, contribution.totals);
+    else addTotals(bucket.totals, contribution.totals);
+    touchedBuckets.add(bucketKey(DSH_SOURCE, contribution.model, contribution.bucketStart));
+  }
 }
 
 // Open, inspect and read through one handle so a path replacement cannot make
@@ -20313,25 +21039,149 @@ function parseDshUsageSlice(raw) {
   };
 }
 
+function isCompleteDshJsonLine(raw) {
+  const text = String(raw || "").trim();
+  if (!text || text[0] !== "{") return false;
+  let index = 0;
+  const maxDepth = 256;
+  const hex = (char) => /[0-9a-f]/i.test(char || "");
+  const skipWhitespace = () => {
+    while (index < text.length && /\s/.test(text[index])) index += 1;
+  };
+  const parseString = () => {
+    if (text[index] !== '"') return false;
+    index += 1;
+    while (index < text.length) {
+      const char = text[index++];
+      if (char === '"') return true;
+      if (char.charCodeAt(0) < 0x20) return false;
+      if (char !== "\\") continue;
+      if (index >= text.length) return false;
+      const escaped = text[index++];
+      if (escaped === "u") {
+        if (index + 4 > text.length || ![...text.slice(index, index + 4)].every(hex)) return false;
+        index += 4;
+      } else if (!'"\\/bfnrt'.includes(escaped)) {
+        return false;
+      }
+    }
+    return false;
+  };
+  const parseNumber = () => {
+    const start = index;
+    if (text[index] === "-") index += 1;
+    if (text[index] === "0") {
+      index += 1;
+    } else if (/[1-9]/.test(text[index] || "")) {
+      while (/[0-9]/.test(text[index] || "")) index += 1;
+    } else {
+      return false;
+    }
+    if (text[index] === ".") {
+      index += 1;
+      const fractionStart = index;
+      while (/[0-9]/.test(text[index] || "")) index += 1;
+      if (index === fractionStart) return false;
+    }
+    if (text[index] === "e" || text[index] === "E") {
+      index += 1;
+      if (text[index] === "+" || text[index] === "-") index += 1;
+      const exponentStart = index;
+      while (/[0-9]/.test(text[index] || "")) index += 1;
+      if (index === exponentStart) return false;
+    }
+    return index > start;
+  };
+  const parseValue = (depth) => {
+    if (depth > maxDepth) return false;
+    skipWhitespace();
+    const char = text[index];
+    if (char === '"') return parseString();
+    if (char === "{") {
+      index += 1;
+      skipWhitespace();
+      if (text[index] === "}") {
+        index += 1;
+        return true;
+      }
+      while (index < text.length) {
+        skipWhitespace();
+        if (!parseString()) return false;
+        skipWhitespace();
+        if (text[index++] !== ":") return false;
+        if (!parseValue(depth + 1)) return false;
+        skipWhitespace();
+        if (text[index] === "}") {
+          index += 1;
+          return true;
+        }
+        if (text[index++] !== ",") return false;
+      }
+      return false;
+    }
+    if (char === "[") {
+      index += 1;
+      skipWhitespace();
+      if (text[index] === "]") {
+        index += 1;
+        return true;
+      }
+      while (index < text.length) {
+        if (!parseValue(depth + 1)) return false;
+        skipWhitespace();
+        if (text[index] === "]") {
+          index += 1;
+          return true;
+        }
+        if (text[index++] !== ",") return false;
+        skipWhitespace();
+      }
+      return false;
+    }
+    for (const literal of ["true", "false", "null"]) {
+      if (text.startsWith(literal, index)) {
+        index += literal.length;
+        return true;
+      }
+    }
+    return parseNumber();
+  };
+
+  if (!parseValue(0)) return false;
+  skipWhitespace();
+  return index === text.length;
+}
+
 // Parse one session log's plaintext into usage deltas, skipping events whose
 // seq is at or below the watermark. Returns the deltas (each carrying the
-// model and epoch-ms timestamp), the highest seq seen, and the session id.
+// sequence, model and epoch-ms timestamp), the highest complete seq seen, the
+// session id, and whether every non-empty JSONL line was complete.
 function extractDshSessionUsage(text, lastSeq = -1) {
   const deltas = [];
   const watermark = Number.isFinite(lastSeq) ? lastSeq : -1;
   let maxSeq = watermark;
   let sessionId = null;
   let headerModel = null;
+  let complete = true;
 
   const lines = String(text || "").split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (!line || !line.trim()) continue;
+    if (!isCompleteDshJsonLine(line)) {
+      complete = false;
+      // A later event cannot make this gap safe to acknowledge. Stop at the
+      // complete prefix so a repaired record is retried before seq advances.
+      break;
+    }
     const eventType = parseDshJsonString(findDshJsonProperty(line, "type"));
     if (!eventType) continue;
 
-    if (eventType === "session") {
-      const id = parseDshJsonString(findDshJsonProperty(line, "id"));
+    if (eventType === "session" || eventType === "session/start") {
+      const id =
+        parseDshJsonString(findDshJsonProperty(line, "id")) ||
+        parseDshJsonString(findDshJsonProperty(findDshJsonProperty(line, "data"), "id")) ||
+        parseDshJsonString(findDshJsonProperty(findDshJsonProperty(line, "data"), "sessionId"));
       if (id) sessionId = id;
       continue;
     }
@@ -20352,77 +21202,322 @@ function extractDshSessionUsage(text, lastSeq = -1) {
       continue;
     }
 
-    if (eventType !== "assistant/message") continue;
+    if (eventType !== "assistant/message" && eventType !== "message/assistant") continue;
     if (seqKnown && seq <= watermark) continue;
 
     const message = findDshJsonProperty(data, "message");
-    const source = findDshJsonProperty(message, "source");
+    const source = message ? findDshJsonProperty(message, "source") : null;
     const model = normalizeDshModelName(
-      parseDshJsonString(findDshJsonProperty(source, "model")),
+      (source && parseDshJsonString(findDshJsonProperty(source, "model"))) ||
+      parseDshJsonString(findDshJsonProperty(data, "model")),
     ) || headerModel;
     const totals = dshUsageToTotals(
-      parseDshUsageSlice(findDshJsonProperty(data, "usage")),
+      parseDshUsageSlice(
+        findDshJsonProperty(data, "usage") || findDshJsonProperty(line, "usage"),
+      ),
     );
     if (!model || !totals) continue;
 
-    const timeMs = parseDshJsonNumber(findDshJsonProperty(line, "time"));
+    const timeMs =
+      parseDshJsonNumber(findDshJsonProperty(line, "time")) ||
+      parseDshJsonNumber(findDshJsonProperty(line, "timestamp")) ||
+      parseDshJsonNumber(findDshJsonProperty(data, "time")) ||
+      parseDshJsonNumber(findDshJsonProperty(data, "timestamp"));
     if (!Number.isFinite(timeMs) || timeMs <= 0) continue;
 
-    deltas.push({ model, timeMs, totals });
+    deltas.push({ seq: seqKnown ? seq : null, model, timeMs, totals });
   }
 
-  return { deltas, maxSeq, sessionId };
+  return { deltas, maxSeq, sessionId, complete };
 }
 
 // Incremental parser entrypoint. Mirrors the other passive JSONL readers:
 // identity-check each file (inode/size/mtime), re-read + re-parse only when it
 // changed, dedup via the per-file seq watermark, accumulate into hourly
-// buckets, then flush touched buckets to the queue.
+// buckets, then flush touched buckets to the queue. Session contribution ledgers
+// make artifact-path migrations replace one session instead of resetting DSH.
 async function parseDshIncremental({ sessionFiles, cursors, queuePath, onProgress }) {
   await ensureDir(path.dirname(queuePath));
   if (!cursors || typeof cursors !== "object") cursors = {};
   if (!cursors.dsh || typeof cursors.dsh !== "object") cursors.dsh = {};
   const dshState = cursors.dsh;
-  const fileState =
+  const storedFileState =
     dshState.files && typeof dshState.files === "object" ? dshState.files : {};
+  let fileState = { ...storedFileState };
+  const storedSessionState =
+    dshState.sessions && typeof dshState.sessions === "object" ? dshState.sessions : {};
+  const sessionState = { ...storedSessionState };
 
   const hourlyState = normalizeHourlyState(cursors?.hourly);
+  // normalizeHourlyState preserves bucket objects for the other incremental
+  // parsers. DSH needs transactional ownership because replacement validation
+  // can defer after inspecting several files and queue append may fail.
+  hourlyState.groupQueued = { ...(hourlyState.groupQueued || {}) };
+  for (const [key, bucket] of Object.entries(hourlyState.buckets || {})) {
+    hourlyState.buckets[key] = {
+      ...(bucket && typeof bucket === "object" ? bucket : {}),
+      totals: {
+        ...initTotals(),
+        ...(bucket?.totals && typeof bucket.totals === "object" ? bucket.totals : {}),
+      },
+    };
+  }
   const touchedBuckets = new Set();
+  const deferredMigrationPaths = new Map();
   const cb = typeof onProgress === "function" ? onProgress : null;
 
-  const files = Array.isArray(sessionFiles) ? sessionFiles : [];
-  const presentFiles = new Set(files.filter((filePath) => typeof filePath === "string"));
+  const files = Array.isArray(sessionFiles)
+    ? sessionFiles.filter((filePath) => typeof filePath === "string")
+    : [];
+  const presentFiles = new Set(files);
   const total = files.length;
+  const deferredFilePaths = new Set();
   let recordsProcessed = 0;
   let eventsAggregated = 0;
+
+  const staleFileForSession = (sessionId, currentPath) => {
+    if (!sessionId) return null;
+    for (const [filePath, state] of Object.entries(fileState)) {
+      if (
+        filePath !== currentPath &&
+        !presentFiles.has(filePath) &&
+        (state?.sessionId === sessionId ||
+          (!state?.sessionId &&
+            dshSessionDirectoryKey(filePath) === dshSessionDirectoryKey(currentPath)))
+      ) {
+        return filePath;
+      }
+    }
+    return null;
+  };
+
+  const deferStaleMigrationPaths = (currentPath, reason) => {
+    let deferred = 0;
+    for (const oldPath of Object.keys(fileState)) {
+      if (
+        !presentFiles.has(oldPath) &&
+        dshSessionDirectoryKey(oldPath) === dshSessionDirectoryKey(currentPath)
+      ) {
+        if (!deferredMigrationPaths.has(oldPath)) deferred += 1;
+        deferredFilePaths.add(oldPath);
+        deferredMigrationPaths.set(oldPath, reason);
+      }
+    }
+    return deferred;
+  };
+
+  const reportProgress = (idx, recordsProcessed, eventsAggregated, total) => {
+    if (cb) {
+      cb({
+        index: idx + 1,
+        total,
+        recordsProcessed,
+        eventsAggregated,
+        bucketsQueued: touchedBuckets.size,
+        deferredMigrations: deferredMigrationPaths.size,
+      });
+    }
+  };
 
   for (let idx = 0; idx < files.length; idx++) {
     const filePath = files[idx];
     const prev = fileState[filePath] || null;
+    const previousSessionId = typeof prev?.sessionId === "string" ? prev.sessionId : null;
+    const previousSession = previousSessionId ? sessionState[previousSessionId] : null;
+    const previousFileContributions = storedDshContributions(prev);
+    const previousSessionContributions = storedDshContributions(previousSession);
+    const needsLedgerBackfill = Boolean(
+      previousSessionId && !previousSessionContributions && !previousFileContributions,
+    );
     let snapshot;
     let parsed;
+    let fullParsed = null;
+    let fileReset = false;
+    let sessionChanged = false;
+
     try {
-      snapshot = await readDshSessionSnapshot(filePath, { previous: prev });
-      if (!snapshot || snapshot.unchanged) {
-        if (cb) {
-          cb({ index: idx + 1, total, recordsProcessed, eventsAggregated, bucketsQueued: touchedBuckets.size });
-        }
+      snapshot = await readDshSessionSnapshot(filePath, {
+        previous: needsLedgerBackfill ? null : prev,
+      });
+      if (!snapshot) {
+        // A resolver-selected replacement can disappear between discovery and
+        // open. Preserve the old path so a later retry cannot re-add its full
+        // contribution. This is deliberately separate from a thrown read
+        // error because a missing path returns null from the snapshot helper.
+        deferStaleMigrationPaths(filePath, "replacement-missing");
+        reportProgress(idx, recordsProcessed, eventsAggregated, total);
+        continue;
+      }
+      if (snapshot.unchanged && !needsLedgerBackfill) {
+        reportProgress(idx, recordsProcessed, eventsAggregated, total);
         continue;
       }
 
-      const lastSeq = Number.isFinite(prev?.lastSeq) ? prev.lastSeq : -1;
+      const previousHasInode = Number.isFinite(prev?.inode);
+      const previousHasSize = Number.isFinite(prev?.size);
+      const previousHasMtime = Number.isFinite(prev?.mtimeMs);
+      fileReset = Boolean(
+        prev &&
+        (
+          (previousHasInode && snapshot.inode !== prev.inode) ||
+          (previousHasSize && snapshot.size < prev.size) ||
+          (
+            previousHasSize &&
+            previousHasMtime &&
+            snapshot.size <= prev.size &&
+            snapshot.mtimeMs !== prev.mtimeMs
+          )
+        ),
+      );
+      const lastSeq = fileReset || !Number.isFinite(prev?.lastSeq) ? -1 : prev.lastSeq;
       parsed = extractDshSessionUsage(snapshot.text, lastSeq);
-      if (prev && parsed.sessionId && parsed.sessionId !== prev.sessionId) {
-        parsed = extractDshSessionUsage(snapshot.text, -1);
+      sessionChanged = Boolean(
+        prev &&
+        parsed.sessionId &&
+        parsed.sessionId !== previousSessionId,
+      );
+      if (sessionChanged) parsed = extractDshSessionUsage(snapshot.text, -1);
+      if (!prev || needsLedgerBackfill || sessionChanged || fileReset) {
+        fullParsed = extractDshSessionUsage(snapshot.text, -1);
+        if (!prev || sessionChanged || fileReset) parsed = fullParsed;
       }
+      if (!parsed.complete) snapshot.mtimeMs = -1;
     } catch (error) {
       if (process.env.TOKENTRACKER_DEBUG) {
         process.stderr.write(`[dsh] skipped ${filePath}: ${error?.message || error}\n`);
       }
-      if (cb) {
-        cb({ index: idx + 1, total, recordsProcessed, eventsAggregated, bucketsQueued: touchedBuckets.size });
-      }
+      // A replacement artifact may have an old path that is no longer in the
+      // selected file list. Keep that cursor until the replacement is readable
+      // so a failed migration cannot turn into an untracked double-count.
+      deferStaleMigrationPaths(filePath, "replacement-read-failed");
+      reportProgress(idx, recordsProcessed, eventsAggregated, total);
       continue;
+    }
+
+    const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : null;
+    const stalePathWithoutId = sessionId
+      ? null
+      : Object.keys(fileState).find(
+          (oldPath) =>
+            !presentFiles.has(oldPath) &&
+            dshSessionDirectoryKey(oldPath) === dshSessionDirectoryKey(filePath),
+        );
+    if (stalePathWithoutId) {
+      deferredFilePaths.add(stalePathWithoutId);
+      deferredMigrationPaths.set(stalePathWithoutId, "replacement-session-id-missing");
+      reportProgress(idx, recordsProcessed, eventsAggregated, total);
+      continue;
+    }
+    const session = sessionId ? sessionState[sessionId] : null;
+    const stalePath = staleFileForSession(sessionId, filePath);
+    const previousPath =
+      session?.lastPath && session.lastPath !== filePath ? session.lastPath : stalePath;
+    const resetCurrentFile = Boolean(fileReset && !sessionChanged);
+    const replacementPath = previousPath || (resetCurrentFile ? filePath : null);
+    const sessionContributions = storedDshContributions(session);
+    const staleContributions = storedDshContributions(stalePath && fileState[stalePath]);
+    const fileContributions = storedDshContributions(prev);
+    let oldContributions = sessionContributions || staleContributions || fileContributions;
+
+    // A pure rename preserves the same physical bytes and metadata, so an old
+    // cursor can safely adopt the new path without relying on rewritten seqs.
+    const previousState = previousPath ? fileState[previousPath] : null;
+    if (
+      sessionId &&
+      previousPath &&
+      !oldContributions &&
+      !prev &&
+      parsed.complete &&
+      previousState &&
+      previousState.inode === snapshot.inode &&
+      previousState.size === snapshot.size &&
+      previousState.mtimeMs === snapshot.mtimeMs
+    ) {
+      // A pure rename preserves the same bytes. Reusing the parsed full
+      // contribution is safe here because replacement below subtracts and
+      // re-adds it; no sequence watermark is transferred.
+      oldContributions = dshContributionsFromDeltas(parsed.deltas);
+    }
+
+    // Cursors written before the contribution ledger existed can still be
+    // reconciled when the old artifact remains available and its same-inode
+    // growth follows the Harness append-only contract. Reconstruct only the
+    // prefix through the old watermark; using the whole current artifact would
+    // subtract events that were appended after the old cursor was written.
+    if (sessionId && previousPath && !oldContributions) {
+      const oldState = fileState[previousPath];
+      const oldSnapshot = await readDshSessionSnapshot(previousPath).catch(() => null);
+      oldContributions = legacyDshContributionsFromSnapshot(oldSnapshot, oldState);
+    }
+    const replaceSession = Boolean(
+      sessionId &&
+      oldContributions &&
+      (!prev || resetCurrentFile || (previousPath && previousPath !== filePath)),
+    );
+    const oldContributionCount = Object.keys(oldContributions || {}).length;
+    if (sessionId && replacementPath && !oldContributions) {
+      deferredFilePaths.add(replacementPath);
+      deferredMigrationPaths.set(replacementPath, "legacy-baseline-unavailable");
+      if (resetCurrentFile) fileState[filePath] = { ...prev, mtimeMs: -1 };
+      reportProgress(idx, recordsProcessed, eventsAggregated, total);
+      continue;
+    }
+    if (
+      replaceSession &&
+      (!parsed.complete || (oldContributionCount > 0 && parsed.deltas.length === 0))
+    ) {
+      // A readable header-only or torn replacement is not authoritative. Keep
+      // the old contribution until a complete replacement with usage arrives.
+      deferredFilePaths.add(replacementPath);
+      deferredMigrationPaths.set(
+        replacementPath,
+        parsed.complete ? "replacement-has-no-usage" : "replacement-incomplete",
+      );
+      if (resetCurrentFile) fileState[filePath] = { ...prev, mtimeMs: -1 };
+      reportProgress(idx, recordsProcessed, eventsAggregated, total);
+      continue;
+    }
+    const candidateContributions = dshContributionsFromDeltas(parsed.deltas);
+    if (
+      replaceSession &&
+      oldContributionCount > 0 &&
+      !dshContributionsCoverPrior(oldContributions, candidateContributions)
+    ) {
+      // A complete-looking replacement that drops a previously counted bucket
+      // is still unsafe. Format migration should preserve prior usage; defer
+      // until a candidate with a verifiable superset arrives.
+      deferredFilePaths.add(replacementPath);
+      deferredMigrationPaths.set(replacementPath, "replacement-drops-prior-usage");
+      if (resetCurrentFile) fileState[filePath] = { ...prev, mtimeMs: -1 };
+      reportProgress(idx, recordsProcessed, eventsAggregated, total);
+      continue;
+    }
+    if (replaceSession && !dshContributionsFitHourlyState(hourlyState, oldContributions)) {
+      // Never let subtractTotals clamp away another session's history when the
+      // persisted ledger and hourly bucket disagree. Defer for a repairable,
+      // visible retry instead.
+      deferredFilePaths.add(replacementPath);
+      deferredMigrationPaths.set(replacementPath, "stored-contribution-not-in-bucket");
+      if (resetCurrentFile) fileState[filePath] = { ...prev, mtimeMs: -1 };
+      reportProgress(idx, recordsProcessed, eventsAggregated, total);
+      continue;
+    }
+
+    if (replaceSession) {
+      applyDshContributions({
+        hourlyState,
+        touchedBuckets,
+        contributions: oldContributions,
+        subtract: true,
+      });
+      if (previousPath && !presentFiles.has(previousPath)) delete fileState[previousPath];
+    }
+
+    let nextContributions = replaceSession
+      ? {}
+      : sessionContributions || fileContributions || {};
+    if (fullParsed) {
+      nextContributions = dshContributionsFromDeltas(fullParsed.deltas);
     }
 
     for (const delta of parsed.deltas) {
@@ -20431,35 +21526,73 @@ async function parseDshIncremental({ sessionFiles, cursors, queuePath, onProgres
       const bucket = getHourlyBucket(hourlyState, DSH_SOURCE, delta.model, bucketStart);
       addTotals(bucket.totals, delta.totals);
       touchedBuckets.add(bucketKey(DSH_SOURCE, delta.model, bucketStart));
+      if (!fullParsed) addDshContribution(nextContributions, delta.model, bucketStart, delta.totals);
       eventsAggregated += 1;
     }
 
+    const updatedAt = new Date().toISOString();
     fileState[filePath] = {
       inode: snapshot.inode,
       size: snapshot.size,
       mtimeMs: snapshot.mtimeMs,
-      sessionId: parsed.sessionId || null,
+      sessionId,
       lastSeq: parsed.maxSeq,
-      updatedAt: new Date().toISOString(),
+      contributions: nextContributions,
+      updatedAt,
     };
+    if (sessionId) {
+      sessionState[sessionId] = {
+        lastPath: filePath,
+        contributions: nextContributions,
+        updatedAt,
+      };
+    }
     recordsProcessed += 1;
 
-    if (cb) {
-      cb({ index: idx + 1, total, recordsProcessed, eventsAggregated, bucketsQueued: touchedBuckets.size });
-    }
+    reportProgress(idx, recordsProcessed, eventsAggregated, total);
   }
 
+  const nowMs = Date.now();
   for (const filePath of Object.keys(fileState)) {
-    if (!presentFiles.has(filePath)) delete fileState[filePath];
+    if (presentFiles.has(filePath) || deferredFilePaths.has(filePath)) continue;
+    const state = fileState[filePath];
+    const legacySessionId = typeof state?.sessionId === "string" ? state.sessionId : null;
+    // Retain pre-ledger identity until a replacement is verified. Its counted
+    // usage survives file deletion, so elapsed time cannot authorize replay.
+    // Current ledgers retain the same identity in sessionState instead.
+    if (legacySessionId && !storedDshContributions(state) && !sessionState[legacySessionId]) {
+      if (!Number.isFinite(Number(state?.missingSince))) {
+        fileState[filePath] = { ...state, missingSince: nowMs };
+      }
+      continue;
+    }
+    delete fileState[filePath];
   }
 
   const bucketsQueued = await enqueueTouchedBuckets({ queuePath, hourlyState, touchedBuckets });
-  hourlyState.updatedAt = new Date().toISOString();
+  const updatedAt = new Date().toISOString();
+  hourlyState.updatedAt = updatedAt;
   cursors.hourly = hourlyState;
   dshState.files = fileState;
-  dshState.updatedAt = new Date().toISOString();
+  dshState.sessions = sessionState;
+  if (deferredMigrationPaths.size > 0) {
+    const reasons = [...new Set(deferredMigrationPaths.values())].sort();
+    dshState.deferredMigrations = {
+      count: deferredMigrationPaths.size,
+      reasons,
+      updatedAt,
+    };
+  } else {
+    delete dshState.deferredMigrations;
+  }
+  dshState.updatedAt = updatedAt;
 
-  return { recordsProcessed, eventsAggregated, bucketsQueued };
+  return {
+    recordsProcessed,
+    eventsAggregated,
+    bucketsQueued,
+    deferredMigrations: deferredMigrationPaths.size,
+  };
 }
 
 
@@ -20586,6 +21719,9 @@ module.exports = {
   parseAnythingllmTimestamp,
   readAnythingllmUsageRows,
   parseAnythingllmIncremental,
+  resolveDevinDbPath,
+  readDevinUsageRows,
+  parseDevinIncremental,
   resolveGooseDbPath,
   parseGooseModelName,
   parseGooseCreatedAt,
@@ -20667,6 +21803,8 @@ module.exports = {
   resolveDshHome,
   resolveDshHomes,
   resolveDshSessionFiles,
+  isDshSessionLogName,
+  parseDshVersion,
   readDshSessionText,
   decodeDshZstd,
   inspectDshZstdFrames,

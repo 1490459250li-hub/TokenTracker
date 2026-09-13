@@ -115,6 +115,8 @@ const {
   parseUnslothIncremental,
   resolveAnythingllmDbPath,
   parseAnythingllmIncremental,
+  resolveDevinDbPath,
+  parseDevinIncremental,
   resolveGooseDbPath,
   parseGooseIncremental,
   listDroidSettingsFiles,
@@ -290,6 +292,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "copilot",
   "craft",
   "cursor",
+  "devin",
   "droid",
   "dsh",
   "every-code",
@@ -1593,7 +1596,7 @@ async function cmdSync(argv, context = {}) {
     }
 
     // ── DeepSeek Harness — passive read of ~/.dsh/sessions session logs ──
-    let dshResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    let dshResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0, deferredMigrations: 0 };
     if (sourceAllowed("dsh")) {
       await migrateLegacyDeepseekHarnessSource({ cursors, queuePath, queueStatePath });
       const dshSessionFiles = await resolveDshSessionFiles(process.env);
@@ -1612,6 +1615,15 @@ async function cmdSync(argv, context = {}) {
             queuePath,
             onProgress: makeProviderProgress("DeepSeek Harness"),
           });
+          if (dshResult.deferredMigrations > 0) {
+            warnProviderParseFailure(
+              "DeepSeek Harness",
+              new Error(
+                `${dshResult.deferredMigrations} artifact migration(s) deferred; inspect cursors.dsh.deferredMigrations and retry after the replacement is complete`,
+              ),
+              opts,
+            );
+          }
         } catch (err) {
           warnProviderParseFailure("DeepSeek Harness", err, opts);
         }
@@ -1674,6 +1686,26 @@ async function cmdSync(argv, context = {}) {
           });
         } catch (err) {
           warnProviderParseFailure("AnythingLLM", err, opts);
+        }
+      }
+    }
+
+    // ── Devin CLI (Cognition) — SQLite message_nodes chat_message metrics ──
+    let devinResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    if (sourceAllowed("devin")) {
+      const devinDbPath = resolveDevinDbPath(process.env);
+      if (devinDbPath && fssync.existsSync(devinDbPath)) {
+        if (progress?.enabled) progress.start(`Parsing Devin ${renderBar(0)} | buckets 0`);
+        try {
+          devinResult = await parseDevinIncremental({
+            dbPath: devinDbPath,
+            cursors,
+            queuePath,
+            projectQueuePath,
+            onProgress: makeProviderProgress("Devin"),
+          });
+        } catch (err) {
+          warnProviderParseFailure("Devin", err, opts);
         }
       }
     }
@@ -2384,6 +2416,7 @@ async function cmdSync(argv, context = {}) {
           sessionFiles: piFiles,
           cursors,
           queuePath,
+          projectQueuePath,
           env: process.env,
           onProgress: (p) => {
             if (!progress?.enabled) return;
@@ -2932,6 +2965,7 @@ async function cmdSync(argv, context = {}) {
       lmstudioResult.recordsProcessed +
       unslothResult.recordsProcessed +
       anythingllmResult.recordsProcessed +
+      devinResult.recordsProcessed +
       kiloResult.recordsProcessed +
       mimoResult.recordsProcessed +
       zcodeResult.recordsProcessed +
@@ -2970,6 +3004,7 @@ async function cmdSync(argv, context = {}) {
       lmstudioResult.bucketsQueued +
       unslothResult.bucketsQueued +
       anythingllmResult.bucketsQueued +
+      devinResult.bucketsQueued +
       kiloResult.bucketsQueued +
       mimoResult.bucketsQueued +
       zcodeResult.bucketsQueued +

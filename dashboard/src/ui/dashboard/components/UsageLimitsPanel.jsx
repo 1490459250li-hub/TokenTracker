@@ -29,6 +29,12 @@ function commandCodeLoginSnippet() {
     : copy("limits.commandCode.setupHint.snippet_login");
 }
 
+// `devin auth login` is registry-owned (limits.devin.setupHint.snippet_login)
+// so the setup guide and the reauth tooltip share one source of truth.
+function devinLoginSnippet() {
+  return copy("limits.devin.setupHint.snippet_login");
+}
+
 function formatReset(isoOrUnix) {
   const ts = resetToMs(isoOrUnix);
   if (!Number.isFinite(ts)) return null;
@@ -294,6 +300,7 @@ const STATUS_BADGE_TONES = {
 const REAUTH_CLI_COMMANDS = {
   claude: "claude",
   codex: "codex",
+  antigravity: "agy",
 };
 
 function StatusBadge({ label, age = null, tone = "live", tooltip = null }) {
@@ -661,6 +668,7 @@ function renderProviderGroup(id, data, mode, expanded, onToggle, subscription = 
         {id === "commandCode" ? <CommandCodeSetupHint /> : null}
         {id === "codingPlan" ? <ArkCodingPlanSetupHint /> : null}
         {id === "agentPlan" ? <ArkAgentPlanSetupHint /> : null}
+        {id === "devin" ? <DevinSetupHint /> : null}
       </>,
       expanded,
       onToggle,
@@ -692,6 +700,7 @@ function renderProviderGroup(id, data, mode, expanded, onToggle, subscription = 
         {id === "commandCode" ? <CommandCodeSetupHint /> : null}
         {id === "codingPlan" ? <ArkCodingPlanSetupHint /> : null}
         {id === "agentPlan" ? <ArkAgentPlanSetupHint /> : null}
+        {id === "devin" ? <DevinSetupHint /> : null}
       </>,
       expanded,
       onToggle,
@@ -704,7 +713,26 @@ function renderProviderGroup(id, data, mode, expanded, onToggle, subscription = 
   const baseName = limitProviderName(id);
   const title = data.plan_label ? `${baseName} ${data.plan_label}` : baseName;
   let badge = null;
-  if (id === "antigravity") {
+  // Reauth is more actionable than a cached/live freshness badge: the bars
+  // will not move again until the user signs in, even if a disk snapshot
+  // is still visible.
+  if (data.auth_action_required === "reauth") {
+    const command =
+      id === "commandCode"
+        ? commandCodeLoginSnippet()
+        : id === "devin"
+          ? devinLoginSnippet()
+          : REAUTH_CLI_COMMANDS[id];
+    badge = (
+      <StatusBadge
+        label={copy("limits.reauth.badge")}
+        age={ago(data.cached_at)}
+        tone="stale"
+        tooltip={command ? copy("limits.reauth.tooltip", { command }) : null}
+      />
+    );
+  }
+  if (!badge && id === "antigravity") {
     if (data.cached) {
       const suffix = ago(data.cached_at);
       badge = <StatusBadge label={copy("limits.label.antigravity_cached")} age={suffix} tone="cached" tooltip={copy("limits.tooltip.antigravity_cached")} />;
@@ -712,7 +740,7 @@ function renderProviderGroup(id, data, mode, expanded, onToggle, subscription = 
       badge = <StatusBadge label={copy("limits.label.antigravity_live")} tone="live" tooltip={copy("limits.tooltip.antigravity_live")} />;
     }
   }
-  if ((id === "qoder" || id === "qoderCn") && data.cached) {
+  if (!badge && (id === "qoder" || id === "qoderCn") && data.cached) {
     badge = (
       <StatusBadge
         label={copy("limits.label.antigravity_cached")}
@@ -724,30 +752,13 @@ function renderProviderGroup(id, data, mode, expanded, onToggle, subscription = 
   }
   // Ark plans are refreshed by the local arkcli binary, not by launching an
   // app — a Qoder-specific tooltip would send users to the wrong tool.
-  if ((id === "codingPlan" || id === "agentPlan") && data.cached) {
+  if (!badge && (id === "codingPlan" || id === "agentPlan") && data.cached) {
     badge = (
       <StatusBadge
         label={copy("limits.label.antigravity_cached")}
         age={ago(data.cached_at)}
         tone="cached"
         tooltip={copy("limits.tooltip.ark_cached")}
-      />
-    );
-  }
-  // An expired sign-in means every live fetch fails the same way and the bars
-  // silently freeze on the cached snapshot (issue 330) — more actionable than
-  // the generic stale badge below, so it takes precedence.
-  if (!badge && data.auth_action_required === "reauth") {
-    const command =
-      id === "commandCode"
-        ? commandCodeLoginSnippet()
-        : REAUTH_CLI_COMMANDS[id];
-    badge = (
-      <StatusBadge
-        label={copy("limits.reauth.badge")}
-        age={ago(data.cached_at)}
-        tone="stale"
-        tooltip={command ? copy("limits.reauth.tooltip", { command }) : null}
       />
     );
   }
@@ -964,6 +975,37 @@ function CommandCodeSetupHint() {
   );
 }
 
+// Devin quota is read through the Devin CLI's saved sign-in on this machine
+// — the backend reuses the session token the CLI wrote to its credentials
+// file, so all the row needs is the CLI installed and signed in once.
+// TokenTracker only ever sends that token to Devin's official quota endpoint.
+function DevinSetupHint() {
+  const loginSnippet = devinLoginSnippet();
+
+  return (
+    <div className="mt-1.5 rounded-lg border border-oai-gray-200 dark:border-oai-gray-700/60 bg-oai-gray-50/50 dark:bg-oai-gray-900/20 p-3 text-[11px] text-oai-gray-600 dark:text-oai-gray-300">
+      <div className="text-[12px] font-semibold text-oai-gray-800 dark:text-oai-gray-100">
+        {copy("limits.devin.setupHint.title")}
+      </div>
+      <div className="mt-0.5 leading-snug text-oai-gray-500 dark:text-oai-gray-400">
+        {copy("limits.devin.setupHint.subtitle")}
+      </div>
+
+      <ol className="mt-2.5 space-y-2.5">
+        <HintStep n="1">
+          <div>{copy("limits.devin.setupHint.step1")}</div>
+          <pre className="mt-1.5 overflow-x-auto rounded-md bg-oai-gray-100 dark:bg-oai-gray-900/60 px-2 py-1.5 font-mono text-[10.5px] leading-relaxed whitespace-pre">
+            {loginSnippet}
+          </pre>
+          <div className="mt-1 text-[10px] text-oai-gray-400 dark:text-oai-gray-500">
+            {copy("limits.devin.setupHint.note")}
+          </div>
+        </HintStep>
+      </ol>
+    </div>
+  );
+}
+
 // Ark Coding Plan (火山方舟) quota comes from the official Ark CLI (arkcli)
 // running on this machine — there is no public quota endpoint, so the CLI is
 // feature-detected at fetch time. When it is missing (or not signed in) the
@@ -1127,8 +1169,8 @@ function useWidestLabelWidth(containerRef) {
   return labelWidth;
 }
 
-export function UsageLimitsPanel({ claude, codex, cursor, gemini, kimi, kiro, grok, antigravity, copilot, zcode, opencodeGo, commandCode, qoder, qoderCn, codingPlan, agentPlan, order, visibility, displayMode, subscriptions = [], showSubscriptions = true }) {
-  const dataById = { claude, codex, cursor, gemini, kimi, kiro, grok, antigravity, copilot, zcode, opencodeGo, commandCode, qoder, qoderCn, codingPlan, agentPlan };
+export function UsageLimitsPanel({ claude, codex, cursor, gemini, kimi, kiro, grok, antigravity, copilot, zcode, opencodeGo, commandCode, qoder, qoderCn, codingPlan, agentPlan, devin, order, visibility, displayMode, subscriptions = [], showSubscriptions = true }) {
+  const dataById = { claude, codex, cursor, gemini, kimi, kiro, grok, antigravity, copilot, zcode, opencodeGo, commandCode, qoder, qoderCn, codingPlan, agentPlan, devin };
   const containerRef = useRef(null);
   const labelWidth = useWidestLabelWidth(containerRef);
   const [expandedId, setExpandedId] = useState(null);
