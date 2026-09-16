@@ -8,8 +8,10 @@ const { readJson } = require("../lib/fs");
 const { readCursorStateSummary } = require("../lib/cursor-store");
 const {
   readCodexNotify,
+  readAcodeNotify,
   readEveryCodeNotify,
   buildCodexNotifyCmd,
+  buildAcodeNotifyCmd,
   isManagedNotifyCmd,
 } = require("../lib/codex-config");
 const {
@@ -71,10 +73,17 @@ const {
   resolveKilocodeTaskFiles,
   resolveRoocodeTaskFiles,
   resolveZedDbPath,
+  resolveLmstudioHome,
+  resolveLmstudioLogFiles,
+  resolveUnslothDbPath,
   resolveQoderDbPaths,
   resolveQoderCnDbPaths,
+  resolveQoderProjectsDir,
+  resolveQoderCnProjectsDir,
+  listQoderNewSessionFiles,
   resolveClaudeScienceDbPaths,
   resolveAnythingllmDbPath,
+  resolveDevinDbPath,
   resolveGooseDbPath,
   listDroidSettingsFiles,
   resolveDroidSessionsDir,
@@ -129,6 +138,13 @@ function formatResolvedPaths(paths, filename) {
   return active;
 }
 
+// Combine a legacy DB path with its new-JSONL projects-dir path for the
+// machine-readable summary. Either side may be "" (absent); both absent
+// yields "" so callers can fall back to "not found".
+function summarizeQoderDetail(dbPath, newPath) {
+  return [dbPath, newPath].filter(Boolean).join(" + ") || "";
+}
+
 // The Trae SOLO entitlement snapshot is read directly from the Trae Local
 // State storage.json via the shared parser (readTraeEntitlementFromStorage).
 // The queue.jsonl contract is token-count-only (CLAUDE.md privacy rule), so
@@ -177,6 +193,8 @@ async function cmdStatus(argv = []) {
   const syncSkipPath = path.join(trackerDir, "sync.skip.json");
   const codexHome = process.env.CODEX_HOME || path.join(home, ".codex");
   const codexConfigPath = path.join(codexHome, "config.toml");
+  const acodeHome = process.env.TOKENTRACKER_ACODE_HOME || path.join(home, ".acode");
+  const acodeConfigPath = path.join(acodeHome, "config.toml");
   const codeHome = process.env.CODE_HOME || path.join(home, ".code");
   const codeConfigPath = path.join(codeHome, "config.toml");
   const claudeSettingsPath = path.join(home, ".claude", "settings.json");
@@ -198,6 +216,7 @@ async function cmdStatus(argv = []) {
   });
   const notifyPath = path.join(binDir, "notify.cjs");
   const codexNotifyCmd = buildCodexNotifyCmd(notifyPath);
+  const acodeNotifyCmd = buildAcodeNotifyCmd(notifyPath);
   const claudeHookCommand = buildClaudeHookCommand(notifyPath);
   const codebuddyHookCommand = buildHookCommand(notifyPath, "codebuddy");
   const workbuddyHookCommand = buildHookCommand(notifyPath, "workbuddy");
@@ -229,6 +248,8 @@ async function cmdStatus(argv = []) {
   // terminal `tokentracker` run, so a correctly-installed integration would
   // otherwise report as not configured. See isManagedNotifyCmd.
   const notifyConfigured = isManagedNotifyCmd(codexNotify, codexNotifyCmd);
+  const acodeNotify = await readAcodeNotify(acodeConfigPath);
+  const acodeConfigured = isManagedNotifyCmd(acodeNotify, acodeNotifyCmd);
   const everyCodeNotify = await readEveryCodeNotify(codeConfigPath);
   const everyCodeConfigured =
     Array.isArray(everyCodeNotify) && everyCodeNotify.length > 0;
@@ -495,15 +516,28 @@ async function cmdStatus(argv = []) {
   const zcodeInstalled = zcodeActive.length > 0;
   const zcodeDbPath = zcodeActive.join(" | ");
 
-  // Qoder Desktop 1.18+ — token usage lives in SharedClientCache/local.db.
+  // Qoder Desktop 1.18+ — token usage lives in SharedClientCache/local.db (legacy)
+  // and since 2026-08 (app 0.1.2+) also in ~/.qoder/projects JSONL (credit-based).
   const qoderPaths = resolveQoderDbPaths({
     home,
     env: process.env,
     platform: process.platform,
   });
   const qoderActive = formatResolvedPaths(qoderPaths);
-  const qoderInstalled = qoderActive.length > 0;
+  // New JSONL location (com.qoder.app.stable + ~/.qoder/projects)
+  const qoderProjectsDirResolved = resolveQoderProjectsDir({ home, env: process.env });
+  let qoderNewFiles = [];
+  try {
+    qoderNewFiles = await listQoderNewSessionFiles(qoderProjectsDirResolved);
+  } catch (_e) {
+    qoderNewFiles = [];
+  }
+  const qoderNewInstalled = qoderNewFiles.length > 0;
+  const qoderInstalled = qoderActive.length > 0 || qoderNewInstalled;
   const qoderDbPath = qoderActive.join(" | ");
+  const qoderNewPath = qoderNewFiles.length > 0
+    ? `${qoderProjectsDirResolved} (${qoderNewFiles.length} sessions)`
+    : "";
 
   // Qoder CN (国内版) — same schema, separate Application Support/QoderCN dir.
   const qoderCnPaths = resolveQoderCnDbPaths({
@@ -512,8 +546,28 @@ async function cmdStatus(argv = []) {
     platform: process.platform,
   });
   const qoderCnActive = formatResolvedPaths(qoderCnPaths);
-  const qoderCnInstalled = qoderCnActive.length > 0;
+  // CN new-JSONL mirrors sync.js: the new CN app writes ~/.qoder-cn/projects,
+  // but sync only parses the CN dir when it diverges from the international
+  // one (same files must not count under two sources). Only report CN JSONL
+  // when the dirs diverge.
+  const qoderCnProjectsDirResolved = resolveQoderCnProjectsDir({ home, env: process.env });
+  const qoderCnSharesIntlDir = path.normalize(qoderCnProjectsDirResolved) === path.normalize(qoderProjectsDirResolved)
+    || (process.platform === "win32"
+      && path.normalize(qoderCnProjectsDirResolved).toLowerCase() === path.normalize(qoderProjectsDirResolved).toLowerCase());
+  let qoderCnNewFiles = [];
+  if (!qoderCnSharesIntlDir) {
+    try {
+      qoderCnNewFiles = await listQoderNewSessionFiles(qoderCnProjectsDirResolved);
+    } catch (_e) {
+      qoderCnNewFiles = [];
+    }
+  }
+  const qoderCnNewInstalled = qoderCnNewFiles.length > 0;
+  const qoderCnInstalled = qoderCnActive.length > 0 || qoderCnNewInstalled;
   const qoderCnDbPath = qoderCnActive.join(" | ");
+  const qoderCnNewPath = qoderCnNewFiles.length > 0
+    ? `${qoderCnProjectsDirResolved} (${qoderCnNewFiles.length} sessions)`
+    : "";
 
   // Claude Science — token usage lives on the `frames` table of operon-cli.db.
   // Unlike the native/WSL pair other providers resolve to, this is an open-ended
@@ -604,6 +658,15 @@ async function cmdStatus(argv = []) {
   const codexActive = formatResolvedPaths(codexPaths, ["sessions", "archived_sessions"]);
   const codexInstalledStatus = codexActive.length > 0;
 
+  const acodePaths = resolveInstallPaths({
+    nativeValue: acodeHome,
+    wslDir: ".acode",
+    requireAnyChild: ["sessions", "archived_sessions"],
+    union: true,
+  });
+  const acodeActive = formatResolvedPaths(acodePaths, ["sessions", "archived_sessions"]);
+  const acodeInstalled = acodeActive.length > 0;
+
   // Kimi (passive sessions scan)
   const kimiPaths = resolveInstallPaths({
     nativeValue: path.join(home, ".kimi"),
@@ -644,6 +707,15 @@ async function cmdStatus(argv = []) {
   const dshSessionsDir = dshHomes.map((homeDir) => path.join(homeDir, "sessions")).join(", ");
   const dshSessionFiles = await resolveDshSessionFiles(process.env);
   const dshInstalled = dshSessionFiles.length > 0;
+  const lmstudioHome = resolveLmstudioHome(process.env);
+  const lmstudioLogFiles = await resolveLmstudioLogFiles(process.env);
+  const lmstudioInstalled = lmstudioLogFiles.length > 0;
+  const unslothDbPath = resolveUnslothDbPath(process.env);
+  const unslothInstalled = Boolean(unslothDbPath && fssync.existsSync(unslothDbPath));
+
+  // Devin CLI (Cognition) — passive reader of message_nodes usage metrics.
+  const devinDbPath = resolveDevinDbPath(process.env);
+  const devinInstalled = Boolean(devinDbPath && fssync.existsSync(devinDbPath));
 
   // Trae SOLO (ByteDance AI IDE) — passive entitlement snapshot reader.
   const traeStoragePath = resolveTraeStoragePath(process.env);
@@ -836,8 +908,10 @@ async function cmdStatus(argv = []) {
   // syscalls (~5–10ms cold). Memoize.
   const passiveProviders = detectPassiveProviders({
     home,
+    env: process.env,
     hookStatus: {
       codex_notify: notifyConfigured,
+      acode_notify: acodeConfigured,
       every_code_notify: everyCodeConfigured,
       claude: claudeHookConfigured,
       gemini: geminiHookConfigured,
@@ -872,6 +946,7 @@ async function cmdStatus(argv = []) {
       auto_retry: autoRetry || null,
       hooks: {
         codex_notify: notifyConfigured,
+        acode_notify: acodeConfigured,
         every_code_notify: everyCodeConfigured,
         claude: claudeHookConfigured,
         gemini: geminiHookConfigured,
@@ -886,6 +961,9 @@ async function cmdStatus(argv = []) {
         grok: grokInstalled ? Boolean(grokHookState?.configured) : null,
       },
       providers: {
+        acode: acodeInstalled
+          ? { installed: true, detail: acodeActive.join(" | ") }
+          : { installed: false },
         kimi_code: kimiInstalled || kimiCodeInstalled
           ? { installed: true, files: kimiWireFiles.length + kimiCodeWireFiles.length }
           : { installed: false },
@@ -947,10 +1025,10 @@ async function cmdStatus(argv = []) {
           ? { installed: true, detail: zcodeDbPath }
           : { installed: false },
         qoder: qoderInstalled
-          ? { installed: true, detail: qoderDbPath }
+          ? { installed: true, detail: summarizeQoderDetail(qoderDbPath, qoderNewPath) }
           : { installed: false },
         "qoder-cn": qoderCnInstalled
-          ? { installed: true, detail: qoderCnDbPath }
+          ? { installed: true, detail: summarizeQoderDetail(qoderCnDbPath, qoderCnNewPath) }
           : { installed: false },
         "claude-science": claudeScienceInstalled
           ? { installed: true, detail: claudeScienceDbPath }
@@ -970,6 +1048,19 @@ async function cmdStatus(argv = []) {
           : { installed: false },
         dsh: dshInstalled
           ? { installed: true, files: dshSessionFiles.length, detail: dshSessionsDir }
+          : { installed: false },
+        lmstudio: lmstudioInstalled
+          ? {
+              installed: true,
+              files: lmstudioLogFiles.length,
+              detail: path.join(lmstudioHome, "server-logs"),
+            }
+          : { installed: false },
+        unsloth: unslothInstalled
+          ? { installed: true, detail: unslothDbPath }
+          : { installed: false },
+        devin: devinInstalled
+          ? { installed: true, detail: devinDbPath }
           : { installed: false },
         trae: traeInstalled
           ? {
@@ -1046,6 +1137,7 @@ async function cmdStatus(argv = []) {
       syncSkipLine,
       autoRetryLine,
       `- Codex notify: ${notifyConfigured ? JSON.stringify(codexNotify) : "unset"}`,
+      `- AStudio notify: ${acodeConfigured ? JSON.stringify(acodeNotify) : "unset"}`,
       `- Every Code notify: ${everyCodeConfigured ? JSON.stringify(everyCodeNotify) : "unset"}`,
       `- Claude hooks: ${claudeHookConfigured ? "set" : "unset"}`,
       claudeCodeInstalled
@@ -1102,10 +1194,10 @@ async function cmdStatus(argv = []) {
         ? `- ZCode: passive reader (${zcodeDbPath})`
         : null,
       qoderInstalled
-        ? `- Qoder: passive reader (${qoderDbPath})`
+        ? `- Qoder: passive reader (${[qoderDbPath, qoderNewPath].filter(Boolean).join(" + ") || "not found"}${qoderNewInstalled && qoderActive.length > 0 ? " [legacy DB + new JSONL (both tracked)]" : ""}${qoderNewInstalled && qoderActive.length === 0 ? " [new JSONL only]" : ""})`
         : null,
       qoderCnInstalled
-        ? `- Qoder CN: passive reader (${qoderCnDbPath})`
+        ? `- Qoder CN: passive reader (${summarizeQoderDetail(qoderCnDbPath, qoderCnNewPath) || "not found"}${qoderCnNewInstalled && qoderCnActive.length > 0 ? " [legacy DB + new JSONL (both tracked)]" : ""}${qoderCnNewInstalled && qoderCnActive.length === 0 ? " [new JSONL only]" : ""})`
         : null,
       claudeScienceInstalled
         ? `- Claude Science: passive reader (${claudeScienceDbPath})`
@@ -1128,6 +1220,9 @@ async function cmdStatus(argv = []) {
       codexInstalledStatus
         ? `- Codex CLI: sessions found (${codexActive.join(" | ")})`
         : null,
+      acodeInstalled
+        ? `- AStudio: sessions found (${acodeActive.join(" | ")})`
+        : null,
       kilocodeInstalled
         ? `- Kilo Code (VS Code extension): passive reader (${kilocodeTaskFiles.length} task${kilocodeTaskFiles.length !== 1 ? "s" : ""} across ${new Set(kilocodeTaskFiles.map((t) => t.ide)).size} IDE${new Set(kilocodeTaskFiles.map((t) => t.ide)).size !== 1 ? "s" : ""})`
         : null,
@@ -1149,6 +1244,15 @@ async function cmdStatus(argv = []) {
         : null,
       dshInstalled
         ? `- DeepSeek Harness: passive reader (${dshSessionFiles.length} session${dshSessionFiles.length !== 1 ? "s" : ""} in ${dshSessionsDir})`
+        : null,
+      lmstudioInstalled
+        ? `- LM Studio: passive reader (${lmstudioLogFiles.length} log${lmstudioLogFiles.length !== 1 ? "s" : ""} in ${path.join(lmstudioHome, "server-logs")})`
+        : null,
+      unslothInstalled
+        ? `- Unsloth Studio: passive reader (${unslothDbPath})`
+        : null,
+      devinInstalled
+        ? `- Devin CLI: passive reader (${devinDbPath})`
         : null,
       traeInstalled
         // Deliberately NOT "passive reader": every other line with that wording
@@ -1228,8 +1332,10 @@ function formatCopilotLines({ token, otel, sessionStore, appDb }) {
   const appDbState = appDb?.app_db_has_file
     ? `${appDb.app_db_mode || "set"} (${(appDb.app_db_paths || []).join(", ")})`
     : `not found (${appDb?.app_db_path || "unknown"})`;
+  const otelLocation =
+    otel.otel_path || otel.otel_detected_paths?.[0] || otel.otel_default_dir;
   const usageState = otel.otel_has_files
-    ? `set (${otel.otel_path || otel.otel_default_dir})`
+    ? `set (${otelLocation})`
     : otel.otel_enabled
       ? "enabled but no files yet"
       : "unset (OTEL export not enabled)";
@@ -1449,4 +1555,4 @@ function parseEpochMsToIso(v) {
   return d.toISOString();
 }
 
-module.exports = { cmdStatus };
+module.exports = { cmdStatus, summarizeQoderDetail };

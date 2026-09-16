@@ -35,8 +35,11 @@ enum LimitResetProviderIconCatalog {
         case "copilot": return "copilot.svg"
         case "zcode": return "zcode.svg"
         case "opencodeGo": return "opencode.svg"
+        case "commandCode": return "commandcode.svg"
         case "qoder": return "qoder.svg"
         case "codingPlan": return "volcano-ark.svg"
+        case "agentPlan": return "volcano-ark.svg"
+        case "devin": return "devin.svg"
         default: return nil
         }
     }
@@ -93,15 +96,19 @@ struct WeeklyLimitResetDetector {
 
         for reading in readings {
             let key = reading.windowKey
+            // A reading without a reset timestamp (e.g. Claude's 5h window sitting idle
+            // after rollover reports 0% / null) carries no window identity, so it must
+            // not touch the baseline: overwriting the percent with 0 here would make the
+            // next real reading fail the minDrop check and silently lose the celebration.
+            guard let curReset = reading.resetAt else { continue }
             let prevPercent = snapshot.lastPercent[key]
             let prevReset = snapshot.lastResetAt[key]
             updated.lastPercent[key] = reading.usedPercent
-            if let resetAt = reading.resetAt { updated.lastResetAt[key] = resetAt }   // keep last value when missing
+            updated.lastResetAt[key] = curReset
 
-            // Need a full prior baseline (percent + reset time) and a current reset
-            // time. First observation, or a window without a reset timestamp, only
+            // Need a full prior baseline (percent + reset time). First observation only
             // records a baseline — never celebrates.
-            guard let prevPercent, let prevReset, let curReset = reading.resetAt else { continue }
+            guard let prevPercent, let prevReset else { continue }
             // The window must have actually rolled over: its reset_at advanced to a
             // new period, not merely a percentage that dipped.
             guard curReset > prevReset + resetAdvanceTolerance else { continue }
@@ -220,7 +227,7 @@ extension UsageLimitsResponse {
             }
         }
 
-        addGeneric("cursor", cursor.configured, cursor.error, [("primary", Strings.cursorPlanLabel, cursor.primaryWindow), ("secondary", Strings.cursorAutoLabel, cursor.secondaryWindow), ("tertiary", "API", cursor.tertiaryWindow)])
+        addGeneric("cursor", cursor.configured, cursor.error, [("primary", Strings.cursorPlanLabel, cursor.primaryWindow), ("secondary", Strings.cursorAutoLabel, cursor.secondaryWindow), ("tertiary", "API", cursor.tertiaryWindow), ("quaternary", Strings.cursorGrokBotLabel, cursor.quaternaryWindow)])
         addGeneric("gemini", gemini.configured, gemini.error, [("primary", "Pro", gemini.primaryWindow), ("secondary", "Flash", gemini.secondaryWindow), ("tertiary", "Lite", gemini.tertiaryWindow)])
         addGeneric("kiro", kiro.configured, kiro.error, [("primary", Strings.kiroMonthLabel, kiro.primaryWindow), ("secondary", Strings.kiroBonusLabel, kiro.secondaryWindow)])
         addGeneric("antigravity", antigravity.configured, antigravity.error, [("primary", "Claude 7d", antigravity.primaryWindow), ("secondary", "Claude 5h", antigravity.secondaryWindow), ("tertiary", "Gemini 7d", antigravity.tertiaryWindow), ("quaternary", "Gemini 5h", antigravity.quaternaryWindow)])
@@ -240,6 +247,12 @@ extension UsageLimitsResponse {
                 ("tertiary", "Monthly", opencodeGo.tertiaryWindow),
             ])
         }
+        if let commandCode {
+            addGeneric("commandCode", commandCode.configured, commandCode.error, [
+                ("primary", "5h", commandCode.primaryWindow),
+                ("secondary", "Weekly", commandCode.secondaryWindow),
+            ])
+        }
         if let qoder {
             addGeneric("qoder", qoder.configured, qoder.error, [
                 ("primary", Strings.qoderPlanLabel, qoder.primaryWindow),
@@ -257,6 +270,19 @@ extension UsageLimitsResponse {
                 ("primary", "5h", codingPlan.primaryWindow),
                 ("secondary", "Weekly", codingPlan.secondaryWindow),
                 ("tertiary", "Monthly", codingPlan.tertiaryWindow),
+            ])
+        }
+        if let agentPlan {
+            addGeneric("agentPlan", agentPlan.configured, agentPlan.error, [
+                ("primary", "5h", agentPlan.primaryWindow),
+                ("secondary", "Weekly", agentPlan.secondaryWindow),
+                ("tertiary", "Monthly", agentPlan.tertiaryWindow),
+            ])
+        }
+        if let devin {
+            addGeneric("devin", devin.configured, devin.error, [
+                ("primary", "Daily", devin.primaryWindow),
+                ("secondary", "Weekly", devin.secondaryWindow),
             ])
         }
 

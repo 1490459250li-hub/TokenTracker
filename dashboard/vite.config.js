@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv } from "vite";
 import os from "node:os";
+import { copyRegistryPlugin } from "./scripts/copy-registry-plugin.mjs";
 
 const COPY_REQUIRED_KEYS = [
   "landing.meta.title",
@@ -16,6 +17,9 @@ const COPY_REQUIRED_KEYS = [
   "landing.meta.og_image",
   "landing.meta.og_url",
   "landing.meta.twitter_card",
+  "landing.discovery.tracked_usage",
+  "landing.discovery.limits_summary",
+  "landing.discovery.faq_usage",
   "share.meta.title",
   "share.meta.description",
   "share.meta.og_site_name",
@@ -158,6 +162,9 @@ function buildMeta(prefix = "landing") {
     ogImage: read("og_image"),
     ogUrl: read("og_url"),
     twitterCard: read("twitter_card"),
+    discoveryTrackedUsage: map.get("landing.discovery.tracked_usage") || "",
+    discoveryLimitsSummary: map.get("landing.discovery.limits_summary") || "",
+    discoveryFaqUsage: map.get("landing.discovery.faq_usage") || "",
   };
 }
 
@@ -182,12 +189,20 @@ function injectRichMeta(html, prefix) {
     __TOKENTRACKER_TWITTER_TITLE__: meta.title,
     __TOKENTRACKER_TWITTER_DESCRIPTION__: meta.description,
     __TOKENTRACKER_TWITTER_IMAGE__: meta.ogImage,
+    __TOKENTRACKER_DISCOVERY_LIMITS_SUMMARY__: meta.discoveryLimitsSummary,
+    __TOKENTRACKER_DISCOVERY_FAQ_USAGE__: meta.discoveryFaqUsage,
   };
 
   let output = html;
   for (const [token, value] of Object.entries(replacements)) {
     output = output.replaceAll(token, escapeHtml(value));
   }
+  // This placeholder is inside a JSON-LD string, where HTML entities would
+  // change the value. Escape JSON syntax and prevent a closing script tag.
+  output = output.replaceAll(
+    "__TOKENTRACKER_DISCOVERY_TRACKED_USAGE__",
+    JSON.stringify(meta.discoveryTrackedUsage).slice(1, -1).replaceAll("<", "\\u003c"),
+  );
   return output;
 }
 
@@ -1026,6 +1041,8 @@ async function handleLocalApi(req, res, url) {
       modelAgg.totals.cached_input_tokens += row.cached_input_tokens || 0;
       modelAgg.totals.cache_creation_input_tokens += row.cache_creation_input_tokens || 0;
       modelAgg.totals.reasoning_output_tokens += row.reasoning_output_tokens || 0;
+      modelAgg.totals.total_cost_usd = Number(modelAgg.totals.total_cost_usd || 0)
+        + (Number(row.total_cost_usd) || 0);
     }
 
     // 转换为最终格式
@@ -1189,6 +1206,10 @@ function localDataApiPlugin() {
         const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
         const isRepoPetApi = url.pathname === "/api/local-auth"
           || url.pathname === "/functions/tokentracker-pets"
+          // The subscription store schema/shape evolves with this checkout
+          // (cycle field, corrupt-store backups); a stale packaged app on
+          // :7680 would 404 the Limits-page subscription UI in dev mode.
+          || url.pathname === "/functions/tokentracker-subscription-manager"
           || url.pathname === "/api/pets/import"
           || url.pathname.startsWith("/api/pets/local/")
           || url.pathname.startsWith("/api/pets/codex/");
@@ -1264,7 +1285,13 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
-    plugins: [react(), richLinkMetaPlugin(), routeSeoPagesPlugin(), localDataApiPlugin()],
+    plugins: [
+      copyRegistryPlugin(),
+      react(),
+      richLinkMetaPlugin(),
+      routeSeoPagesPlugin(),
+      localDataApiPlugin(),
+    ],
     ...(Object.keys(define).length ? { define } : {}),
     build: {
       rollupOptions: {

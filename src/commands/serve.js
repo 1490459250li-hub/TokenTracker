@@ -268,6 +268,7 @@ async function cmdServe(argv) {
 
 function startNativeBackgroundSync({
   appShell = process.env.TOKENTRACKER_APP_SHELL,
+  nativeSyncOwner = process.env.TOKENTRACKER_NATIVE_SYNC_OWNER,
   intervalMs = NATIVE_BACKGROUND_SYNC_INTERVAL_MS,
   runSync,
   setIntervalFn = setInterval,
@@ -276,6 +277,11 @@ function startNativeBackgroundSync({
 } = {}) {
   const normalizedShell = String(appShell || "").trim().toLowerCase();
   if (normalizedShell !== "windows") return null;
+  // The Windows tray host owns its five-minute background sync timer and
+  // receives completion events for the UI. Running this server-side fallback
+  // as well creates two independent sync producers that contend on sync.lock,
+  // leaving refreshes stale and needlessly expensive.
+  if (String(nativeSyncOwner || "").trim().toLowerCase() === "windows-host") return null;
 
   // Run the periodic fallback sync in a child process, not in-process:
   // several provider parsers read SQLite databases via execFileSync, which

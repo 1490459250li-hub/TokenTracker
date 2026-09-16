@@ -167,6 +167,170 @@ function writeZcodeBalanceLog(v2, timestamp, { providerId = "builtin:zai-start-p
   );
 }
 
+/** Run a quota scenario with synthetic provider keys in a temporary ZCode home. */
+function withZcodePlanSettings(settings, run) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tt-zcode-team-plan-"));
+  const v2 = path.join(tmp, ".zcode", "v2");
+  fs.mkdirSync(v2, { recursive: true });
+  fs.writeFileSync(path.join(v2, "config.json"), JSON.stringify({
+    provider: Object.fromEntries(["bigmodel", "zai"].map((family) => [
+      `builtin:${family}-coding-plan`,
+      { enabled: true, options: { apiKey: `${family}-key` } },
+    ])),
+  }));
+  fs.writeFileSync(path.join(v2, "setting.json"), JSON.stringify(settings));
+  return Promise.resolve().then(() => run(tmp, v2)).finally(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+}
+
+describe("ZCode team-plan quotas", () => {
+  for (const [family, origin] of [["bigmodel", "https://bigmodel.cn"], ["zai", "https://api.z.ai"]]) {
+    it(`queries the selected ${family} team instead of the personal coding plan`, async () => {
+      await withZcodePlanSettings({
+        providerFamilyDomain: family,
+        modelProviderFamilySelectedKeys: {
+          [family]: `team-plan:builtin:${family}-coding-plan:product-max:org-example:proj-example`,
+        },
+      }, async (home) => {
+        const requests = [];
+        const result = await fetchZcodeLimits({
+          home,
+          env: {},
+          /** Emulate a server that exposes the fixture only with the full team scope. */
+          fetchImpl: async (url, options) => {
+            requests.push({ url, headers: options.headers });
+            // The server accepts the same key, but needs the team scope to find its plan.
+            const teamRequest = new URL(url).searchParams.get("type") === "2"
+              && options.headers["bigmodel-organization"] === "org-example"
+              && options.headers["bigmodel-project"] === "proj-example";
+            return { ok: true, status: 200, async json() {
+              return teamRequest
+                ? realLiteCodingPlanQuotaBody()
+                : { code: 500, success: false, msg: "当前用户不存在coding plan" };
+            } };
+          },
+        });
+        assert.equal(result.error, null);
+        assert.equal(result.provider_key, `builtin:${family}-coding-plan`);
+        assert.equal(result.primary_window.used_percent, 14);
+        assert.deepEqual(requests, [{
+          url: `${origin}/api/monitor/usage/quota/limit?type=2`,
+          headers: {
+            authorization: `${family}-key`,
+            Accept: "application/json",
+            "bigmodel-organization": "org-example",
+            "bigmodel-project": "proj-example",
+          },
+        }]);
+      });
+    });
+  }
+
+  it("decodes team identifiers and preserves quota URL override parameters", async () => {
+    await withZcodePlanSettings({
+      providerFamilyDomain: "bigmodel",
+      modelProviderFamilySelectedKeys: {
+        bigmodel: "team-plan:builtin:bigmodel-coding-plan:product-max:org%3Aexample:proj%2Fexample",
+      },
+    }, async (home) => {
+      const result = await fetchZcodeLimits({
+        home,
+        env: { TOKENTRACKER_ZCODE_MONITOR_QUOTA_URL: "https://quota.example.test/limit?locale=en&type=1" },
+        /** Check decoded routing headers and preserved query parameters before responding. */
+        fetchImpl: async (url, options) => {
+          assert.equal(url, "https://quota.example.test/limit?locale=en&type=2");
+          assert.equal(options.headers["bigmodel-organization"], "org:example");
+          assert.equal(options.headers["bigmodel-project"], "proj/example");
+          return { ok: true, status: 200, async json() { return realLiteCodingPlanQuotaBody(); } };
+        },
+      });
+      assert.equal(result.error, null);
+    });
+  });
+
+  it("keeps another family's team scope off personal-plan requests", async () => {
+    await withZcodePlanSettings({
+      providerFamilyDomain: "bigmodel",
+      modelProviderFamilySelectedKeys: {
+        bigmodel: "coding-plan:builtin:bigmodel-coding-plan",
+        zai: "team-plan:builtin:zai-coding-plan:product-max:org-overseas:proj-overseas",
+      },
+    }, async (home) => {
+      const requests = [];
+      const result = await fetchZcodeLimits({
+        home,
+        env: {},
+        /** Capture the personal request so its complete URL and headers can be compared. */
+        fetchImpl: async (url, options) => {
+          requests.push({ url, headers: options.headers });
+          return { ok: true, status: 200, async json() { return realLiteCodingPlanQuotaBody(); } };
+        },
+      });
+      assert.equal(result.error, null);
+      assert.deepEqual(requests, [{
+        url: "https://bigmodel.cn/api/monitor/usage/quota/limit",
+        headers: { authorization: "bigmodel-key", Accept: "application/json" },
+      }]);
+    });
+  });
+
+  it("does not retain team scope after switching back to a personal plan", async () => {
+    await withZcodePlanSettings({
+      providerFamilyDomain: "bigmodel",
+      modelProviderFamilySelectedKeys: {
+        bigmodel: "team-plan:builtin:bigmodel-coding-plan:product-max:org-example:proj-example",
+      },
+    }, async (home, v2) => {
+      const requests = [];
+      /** Capture both reads across the settings change while keeping the quota response stable. */
+      const fetchImpl = async (url, options) => {
+        requests.push({ url, headers: options.headers });
+        return { ok: true, status: 200, async json() { return realLiteCodingPlanQuotaBody(); } };
+      };
+      await fetchZcodeLimits({ home, env: {}, fetchImpl });
+      fs.writeFileSync(path.join(v2, "setting.json"), JSON.stringify({
+        providerFamilyDomain: "bigmodel",
+        modelProviderFamilySelectedKeys: { bigmodel: "coding-plan:builtin:bigmodel-coding-plan" },
+      }));
+      await fetchZcodeLimits({ home, env: {}, fetchImpl });
+      assert.equal(new URL(requests[0].url).searchParams.get("type"), "2");
+      assert.deepEqual(requests[1], {
+        url: "https://bigmodel.cn/api/monitor/usage/quota/limit",
+        headers: { authorization: "bigmodel-key", Accept: "application/json" },
+      });
+    });
+  });
+
+  it("does not guess team scope from incomplete or malformed selections", async () => {
+    for (const selected of [
+      "team-plan:builtin:bigmodel-coding-plan:product-max:proj-legacy",
+      "team-plan:builtin:bigmodel-coding-plan:product-max::proj-example",
+      "team-plan:builtin:bigmodel-coding-plan:product-max:org-example:",
+      "team-plan:builtin:bigmodel-coding-plan:product-max:%20:proj-example",
+      "team-plan:builtin:bigmodel-coding-plan:product-max:org%ZZ:proj-example",
+    ]) {
+      await withZcodePlanSettings({
+        providerFamilyDomain: "bigmodel",
+        modelProviderFamilySelectedKeys: { bigmodel: selected },
+      }, async (home) => {
+        const result = await fetchZcodeLimits({
+          home,
+          env: {},
+          /** Reject invented team scope when a stored selection cannot identify both IDs. */
+          fetchImpl: async (url, options) => {
+            assert.equal(new URL(url).searchParams.has("type"), false);
+            assert.equal(options.headers["bigmodel-organization"], undefined);
+            assert.equal(options.headers["bigmodel-project"], undefined);
+            return { ok: true, status: 200, async json() { return realLiteCodingPlanQuotaBody(); } };
+          },
+        });
+        assert.equal(result.error, null);
+      });
+    }
+  });
+});
+
 describe("deriveZcodePlanLabel", () => {
   it("extracts the human tier from the raw plan id", () => {
     assert.equal(deriveZcodePlanLabel("zcode-v3-start-plan-0615"), "Start");

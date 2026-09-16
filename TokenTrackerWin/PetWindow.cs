@@ -154,8 +154,23 @@ internal sealed class PetWindow : Window
         };
         _clickThroughTimer.Tick += (_, _) => ClickThroughTick();
 
-        Loaded += async (_, _) => await InitializeWebViewAsync();
+        Loaded += OnLoaded;
         _server.StatusChanged += OnServerStatusChanged;
+    }
+
+    private async void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await InitializeWebViewAsync();
+        }
+        catch (Exception ex)
+        {
+            // WebView2 initialization runs from an async-void WPF event. Keep a
+            // renderer/profile failure from terminating the tray host; the pet can
+            // remain hidden while the dashboard and server continue to recover.
+            Diag.Log("pet", $"webview initialization failed: {ex}");
+        }
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -253,6 +268,8 @@ internal sealed class PetWindow : Window
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.AreDevToolsEnabled = false;
+        core.ProcessFailed += (_, e) =>
+            Diag.Log("pet", $"webview process failed kind={e.ProcessFailedKind}");
 
         // Keep the surface transparent even before the page's own CSS lands.
         await core.AddScriptToExecuteOnDocumentCreatedAsync(

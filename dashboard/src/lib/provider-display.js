@@ -1,6 +1,7 @@
 import { copy } from "./copy";
 
 const SPECIAL_PROVIDER_NAMES = {
+  acode: "AStudio",
   anythingllm: "AnythingLLM",
   claudescience: "Claude Science",
   pianthropic: "Pi · Anthropic",
@@ -8,6 +9,8 @@ const SPECIAL_PROVIDER_NAMES = {
   picopilot: "Pi · Copilot",
   dots: "Dots",
   pidots: "Pi · Dots",
+  lmstudio: "LM Studio",
+  unsloth: "Unsloth Studio",
 };
 
 const SPECIAL_PROVIDER_COPY_KEYS = {

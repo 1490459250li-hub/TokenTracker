@@ -482,7 +482,8 @@ struct ClawdCompanionView: View {
             case .vector where BotFrames.isAvailable:
                 BotSpriteView(
                     state: clawdState.petStateName,
-                    colorId: characterStore.botColor
+                    colorId: characterStore.botColor,
+                    isVisible: isCharacterTimelineVisible
                 )
             case .vector:
                 // Pre-rendered clips missing or schema-stale (run gen:bot-frames).
@@ -1546,7 +1547,7 @@ struct ClawdCompanionView: View {
         }
 
         generic("cursor", configured: limits.cursor.configured, error: limits.cursor.error, windows: [
-            (Strings.cursorPlanLabel, limits.cursor.primaryWindow), (Strings.cursorAutoLabel, limits.cursor.secondaryWindow), ("API", limits.cursor.tertiaryWindow)
+            (Strings.cursorPlanLabel, limits.cursor.primaryWindow), (Strings.cursorAutoLabel, limits.cursor.secondaryWindow), ("API", limits.cursor.tertiaryWindow), (Strings.cursorGrokBotLabel, limits.cursor.quaternaryWindow)
         ])
         generic("gemini", configured: limits.gemini.configured, error: limits.gemini.error, windows: [
             ("Pro", limits.gemini.primaryWindow), ("Flash", limits.gemini.secondaryWindow), ("Lite", limits.gemini.tertiaryWindow)
@@ -1583,10 +1584,20 @@ struct ClawdCompanionView: View {
                 ("5h", opencodeGo.primaryWindow), ("Weekly", opencodeGo.secondaryWindow), ("Month", opencodeGo.tertiaryWindow)
             ])
         }
+        if let commandCode = limits.commandCode {
+            generic("commandCode", configured: commandCode.configured, error: commandCode.error, windows: [
+                ("5h", commandCode.primaryWindow), ("Weekly", commandCode.secondaryWindow)
+            ])
+        }
         if let qoder = limits.qoder {
             generic("qoder", configured: qoder.configured, error: qoder.error, windows: [
                 ("Credits", qoder.primaryWindow),
                 ("Ultimate Free Calls", qoder.secondaryWindow)
+            ])
+        }
+        if let devin = limits.devin {
+            generic("devin", configured: devin.configured, error: devin.error, windows: [
+                ("Daily", devin.primaryWindow), ("Weekly", devin.secondaryWindow)
             ])
         }
 

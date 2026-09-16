@@ -95,7 +95,33 @@ function loadZcodeProviderAvailability({ home, env } = {}) {
   }
 }
 
-function loadZcodeSelectedPlanProviderKeys({ home, env } = {}) {
+/**
+ * Decode routing identifiers from a complete team selection for the given family.
+ * Returns null for personal, malformed, or legacy project-only selections.
+ * @returns {{ organizationId: string, projectId: string } | null}
+ */
+function parseZcodeTeamContext(selection, family) {
+  if (family !== "bigmodel" && family !== "zai") return null;
+  const prefix = `team-plan:builtin:${family}-coding-plan:`;
+  if (!selection.startsWith(prefix)) return null;
+  const parts = selection.slice(prefix.length).split(":");
+  // ZCode 3.10.x stores product:organization:project. Older project-only
+  // selections do not identify an organization, so do not guess its scope.
+  if (parts.length !== 3) return null;
+  try {
+    const [productId, organizationId, projectId] = parts.map((part) => decodeURIComponent(part.trim()).trim());
+    if (!productId || !organizationId || !projectId) return null;
+    return { organizationId, projectId };
+  } catch (_error) {
+    return null;
+  }
+}
+
+/**
+ * Read selected plans in active-family order, retaining each plan's team scope.
+ * Only the provider key and decoded organization/project identifiers are retained.
+ */
+function loadZcodeSelectedPlans({ home, env } = {}) {
   const zcodeHome = resolveZcodeHome({ home, env });
   const settingPath = path.join(zcodeHome, "v2", "setting.json");
   if (!fs.existsSync(settingPath)) return [];
@@ -109,12 +135,18 @@ function loadZcodeSelectedPlanProviderKeys({ home, env } = {}) {
     for (const key of domains) {
       const raw = typeof selected[key] === "string" ? selected[key].trim() : "";
       const match = raw.match(/builtin:(?:bigmodel|zai)-(?:start|coding)-plan/);
-      if (match && !out.includes(match[0])) out.push(match[0]);
+      if (!match || out.some((plan) => plan.providerKey === match[0])) continue;
+      out.push({ providerKey: match[0], teamContext: parseZcodeTeamContext(raw, key) });
     }
     return out;
   } catch (_error) {
     return [];
   }
+}
+
+/** Return the ordered provider keys without exposing the internal team context. */
+function loadZcodeSelectedPlanProviderKeys(options = {}) {
+  return loadZcodeSelectedPlans(options).map((plan) => plan.providerKey);
 }
 
 function resolveZcodeCredentialsPath({ home, env } = {}) {
@@ -246,6 +278,10 @@ function resolveZcodeProviderQuotaUrl(providerKey, provider, env = process.env) 
   return `${origin.replace(/\/$/, "")}${ZCODE_MONITOR_QUOTA_PATH}`;
 }
 
+/**
+ * Build quota/billing candidates from enabled providers and their existing keys.
+ * Selected plans take precedence; team scope stays attached to its own provider.
+ */
 function loadZcodeAuthCandidates({ home, env } = {}) {
   const zcodeHome = resolveZcodeHome({ home, env });
   const configPath = path.join(zcodeHome, "v2", "config.json");
@@ -262,7 +298,8 @@ function loadZcodeAuthCandidates({ home, env } = {}) {
     ];
     const availability = loadZcodeProviderAvailability({ home, env });
     const hasAvailability = Object.keys(availability).length > 0;
-    const selectedCandidates = loadZcodeSelectedPlanProviderKeys({ home, env })
+    const selectedPlans = loadZcodeSelectedPlans({ home, env });
+    const selectedCandidates = selectedPlans.map((plan) => plan.providerKey)
       .filter((key) => defaultCandidates.includes(key));
     const availableCandidates = defaultCandidates.filter((key) => availability?.[key]?.status === "available");
     const candidates = [
@@ -279,6 +316,7 @@ function loadZcodeAuthCandidates({ home, env } = {}) {
       const apiKey = typeof provider?.options?.apiKey === "string" ? provider.options.apiKey.trim() : "";
       const billingBaseUrl = resolveZcodeProviderBillingBaseUrl(key, provider, env);
       const quotaUrl = resolveZcodeProviderQuotaUrl(key, provider, env);
+      const teamContext = selectedPlans.find((plan) => plan.providerKey === key)?.teamContext;
       const credentialApiKey = resolveZcodeCredentialAuth(key, { home, env });
       const authEntries = [
         credentialApiKey ? { apiKey: credentialApiKey, authSource: "credential:zcodejwttoken" } : null,
@@ -296,6 +334,7 @@ function loadZcodeAuthCandidates({ home, env } = {}) {
           baseUrl: provider?.options?.baseURL || null,
           billingBaseUrl,
           quotaUrl,
+          ...(teamContext ? { teamContext } : {}),
           availability: availability?.[key]?.status || null,
         });
       }
@@ -465,13 +504,26 @@ async function fetchZcodeBilling(apiKey, { fetchImpl = fetch, baseUrl, env, home
   return res.json();
 }
 
-async function fetchZcodeCodingPlanQuota(apiKey, { fetchImpl = fetch, quotaUrl } = {}) {
+/**
+ * Fetch quota using the existing provider key and optional team routing metadata.
+ * Organization/project IDs select the subscription at the resolved provider URL;
+ * they do not choose the destination or include the contents of the settings file.
+ */
+async function fetchZcodeCodingPlanQuota(apiKey, { fetchImpl = fetch, quotaUrl, teamContext } = {}) {
+  const headers = {
+    authorization: apiKey,
+    Accept: "application/json",
+  };
+  if (teamContext?.organizationId && teamContext?.projectId) {
+    const url = new URL(quotaUrl);
+    url.searchParams.set("type", "2");
+    quotaUrl = url.toString();
+    headers["bigmodel-organization"] = teamContext.organizationId;
+    headers["bigmodel-project"] = teamContext.projectId;
+  }
   const res = await fetchImpl(quotaUrl, {
     method: "GET",
-    headers: {
-      authorization: apiKey,
-      Accept: "application/json",
-    },
+    headers,
   });
   if (res.status === 401 || res.status === 403) {
     throw new Error("Not authenticated with ZCode coding plan. Run `zcode` in Terminal to log in.");
@@ -697,6 +749,10 @@ function zcodeLogFallbackResult(logRecord, errors = []) {
   };
 }
 
+/**
+ * Return normalized quota windows, trying eligible providers and recent billing logs.
+ * Credentials and internal team routing identifiers are omitted from the result.
+ */
 async function fetchZcodeLimits({ home, env, fetchImpl = fetch, nowMs = Date.now() } = {}) {
   if (!isZcodeInstalled({ home, env })) {
     return { configured: false };
@@ -715,6 +771,7 @@ async function fetchZcodeLimits({ home, env, fetchImpl = fetch, nowMs = Date.now
         ? await fetchZcodeCodingPlanQuota(auth.apiKey, {
             fetchImpl,
             quotaUrl: auth.quotaUrl,
+            teamContext: auth.teamContext,
           })
         : await fetchZcodeBilling(auth.apiKey, {
             fetchImpl,

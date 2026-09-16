@@ -1,4 +1,4 @@
-use tokentracker_linux::{oauth, paths, server, tray};
+use tokentracker_linux::{external, oauth, paths, server, tray};
 
 use std::sync::Mutex;
 
@@ -277,6 +277,22 @@ fn main() {
                 tauri::WebviewUrl::App("index.html".into()),
             )
             .initialization_script(NATIVE_OAUTH_BRIDGE)
+            // `target="_blank"` links (provider status pages, leaderboard
+            // profiles) belong in the system browser. WebKitGTK opens nothing
+            // at all unless this handler is installed.
+            .on_new_window(|url, _features| {
+                external::open_in_browser(&url);
+                tauri::webview::NewWindowResponse::Deny
+            })
+            // The app window has no browser chrome, so a top-level navigation
+            // off the dashboard would strand the user with no way back.
+            .on_navigation(|url| {
+                if external::is_internal_url(url) {
+                    return true;
+                }
+                external::open_in_browser(url);
+                false
+            })
             .title("TokenTracker")
             .inner_size(1180.0, 820.0)
             .min_inner_size(960.0, 640.0)

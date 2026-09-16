@@ -190,6 +190,87 @@ test("usage-summary?account=1 falls back to local data when not signed in", asyn
   assert.equal(body.totals.total_tokens, 120);
 });
 
+test("account-view failures are briefly backed off so refresh fan-out stays responsive", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  const trackerDir = path.join(tmpHome, ".tokentracker", "tracker");
+  fs.mkdirSync(trackerDir, { recursive: true });
+  fs.writeFileSync(path.join(trackerDir, "cloud-sync-pref.json"), JSON.stringify({ enabled: true }));
+  fs.writeFileSync(
+    path.join(trackerDir, "relay-cookies.json"),
+    JSON.stringify({
+      insforge_refresh_token: "insforge_refresh_token=refresh-failing; Path=/; HttpOnly; SameSite=Lax",
+    }),
+  );
+
+  const realFetch = global.fetch;
+  let refreshCalls = 0;
+  global.fetch = async () => {
+    refreshCalls += 1;
+    throw new Error("offline");
+  };
+  try {
+    const handler = freshHandler(queuePath);
+    const endpoint = "/functions/tokentracker-usage-summary?from=2026-04-20&to=2026-04-20&account=1";
+    const first = await call(handler, { endpoint });
+    const second = await call(handler, { endpoint });
+    assert.equal(first._headers["x-tokentracker-account-view"], "0");
+    assert.equal(second._headers["x-tokentracker-account-view"], "0");
+    assert.equal(refreshCalls, 1, "the second refresh should use the failure backoff");
+    assert.equal(second.json().totals.total_tokens, 120);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test("concurrent account-view fan-out shares one pending cloud probe", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  const trackerDir = path.join(tmpHome, ".tokentracker", "tracker");
+  fs.mkdirSync(trackerDir, { recursive: true });
+  fs.writeFileSync(path.join(trackerDir, "cloud-sync-pref.json"), JSON.stringify({ enabled: true }));
+  fs.writeFileSync(
+    path.join(trackerDir, "relay-cookies.json"),
+    JSON.stringify({
+      insforge_refresh_token: "insforge_refresh_token=refresh-concurrent; Path=/; HttpOnly; SameSite=Lax",
+    }),
+  );
+
+  const realFetch = global.fetch;
+  let refreshCalls = 0;
+  let started;
+  const startedPromise = new Promise((resolve) => { started = resolve; });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  global.fetch = async () => {
+    refreshCalls += 1;
+    started();
+    await gate;
+    throw new Error("offline");
+  };
+
+  try {
+    const handler = freshHandler(queuePath);
+    const endpoint = "/functions/tokentracker-usage-summary?from=2026-04-20&to=2026-04-20&account=1";
+    const firstPromise = call(handler, { endpoint });
+    await startedPromise;
+    // The second request arrives while the first refresh-token probe is still
+    // pending. It must immediately use the local fallback rather than opening
+    // another timeout-bound network request.
+    const second = await call(handler, { endpoint });
+    assert.equal(refreshCalls, 1);
+    assert.equal(second._headers["x-tokentracker-account-view"], "0");
+    assert.equal(second.json().totals.total_tokens, 120);
+
+    release();
+    const first = await firstPromise;
+    assert.equal(first._headers["x-tokentracker-account-view"], "0");
+    assert.equal(first.json().totals.total_tokens, 120);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
 test("usage-summary?account=1 serves the cross-device aggregate when signed in + cloud sync on", async () => {
   const queuePath = path.join(tmpHome, "queue.jsonl");
   writeQueue(queuePath, [SAMPLE_ROW]);
@@ -407,3 +488,238 @@ test("usage-hourly?account=1 falls back to local hourly data when account hourly
   }
 });
 
+// --- Fallback classification -------------------------------------------------
+//
+// The popover keeps its last account (cross-device) snapshot when a cloud read
+// fails transiently, but must switch to this-machine data when the user signs
+// out or turns cloud sync off. That is only possible if the local server says
+// WHICH of the two happened.
+
+function seedSignedInTracker() {
+  const trackerDir = path.join(tmpHome, ".tokentracker", "tracker");
+  fs.mkdirSync(trackerDir, { recursive: true });
+  fs.writeFileSync(path.join(trackerDir, "cloud-sync-pref.json"), JSON.stringify({ enabled: true }));
+  fs.writeFileSync(
+    path.join(trackerDir, "relay-cookies.json"),
+    JSON.stringify({
+      insforge_refresh_token: "insforge_refresh_token=refresh-xyz; Path=/; HttpOnly; SameSite=Lax",
+    }),
+  );
+  return trackerDir;
+}
+
+function freshAccessJwt() {
+  return `${Buffer.from(JSON.stringify({ alg: "HS256" })).toString("base64url")}.${Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+  ).toString("base64url")}.sig`;
+}
+
+const HEATMAP_ENDPOINT = "/functions/tokentracker-usage-heatmap?weeks=52&tz=UTC&account=1";
+
+test("account fallback is tagged 'signed-out' when there is no relayed session", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  const trackerDir = path.join(tmpHome, ".tokentracker", "tracker");
+  fs.mkdirSync(trackerDir, { recursive: true });
+  fs.writeFileSync(path.join(trackerDir, "cloud-sync-pref.json"), JSON.stringify({ enabled: true }));
+
+  const handler = freshHandler(queuePath);
+  const res = await call(handler, { endpoint: HEATMAP_ENDPOINT });
+  assert.equal(res._headers["x-tokentracker-account-view"], "0");
+  assert.equal(res._headers["x-tokentracker-account-fallback"], "signed-out");
+});
+
+test("account fallback is tagged 'cloud-sync-off' when the pref is disabled", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  const trackerDir = seedSignedInTracker();
+  fs.writeFileSync(path.join(trackerDir, "cloud-sync-pref.json"), JSON.stringify({ enabled: false }));
+
+  const handler = freshHandler(queuePath);
+  const res = await call(handler, { endpoint: HEATMAP_ENDPOINT });
+  assert.equal(res._headers["x-tokentracker-account-view"], "0");
+  assert.equal(res._headers["x-tokentracker-account-fallback"], "cloud-sync-off");
+});
+
+test("a failing account read is tagged transient, not as a local view", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  seedSignedInTracker();
+
+  const accessJwt = freshAccessJwt();
+  const realFetch = global.fetch;
+  global.fetch = async (urlStr) => {
+    if (String(urlStr).includes("/api/auth/refresh")) {
+      return { ok: true, status: 200, json: async () => ({ accessToken: accessJwt }) };
+    }
+    if (String(urlStr).includes("/functions/tokentracker-account-heatmap")) {
+      return { ok: false, status: 502, json: async () => ({ error: "bad gateway" }) };
+    }
+    throw new Error(`unexpected fetch ${urlStr}`);
+  };
+  try {
+    const handler = freshHandler(queuePath);
+    const res = await call(handler, { endpoint: HEATMAP_ENDPOINT });
+    assert.equal(res._headers["x-tokentracker-account-view"], "0");
+    assert.equal(res._headers["x-tokentracker-account-fallback"], "transient-upstream");
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test("an account read that times out is tagged transient-timeout", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  seedSignedInTracker();
+
+  const accessJwt = freshAccessJwt();
+  const prevTimeout = process.env.TOKENTRACKER_HTTP_TIMEOUT_MS;
+  process.env.TOKENTRACKER_HTTP_TIMEOUT_MS = "10";
+
+  const realFetch = global.fetch;
+  global.fetch = async (urlStr, opts) => {
+    if (String(urlStr).includes("/api/auth/refresh")) {
+      return { ok: true, status: 200, json: async () => ({ accessToken: accessJwt }) };
+    }
+    if (String(urlStr).includes("/functions/tokentracker-account-heatmap")) {
+      return new Promise((resolve, reject) => {
+        const t = setTimeout(() => resolve({ ok: true, status: 200, json: async () => ({}) }), 10000);
+        opts?.signal?.addEventListener("abort", () => {
+          clearTimeout(t);
+          const err = new Error("The operation was aborted.");
+          err.name = "AbortError";
+          reject(err);
+        });
+      });
+    }
+    throw new Error(`unexpected fetch ${urlStr}`);
+  };
+  try {
+    const handler = freshHandler(queuePath);
+    const res = await call(handler, { endpoint: HEATMAP_ENDPOINT });
+    assert.equal(res._headers["x-tokentracker-account-view"], "0");
+    assert.equal(res._headers["x-tokentracker-account-fallback"], "transient-timeout");
+  } finally {
+    global.fetch = realFetch;
+    if (prevTimeout === undefined) delete process.env.TOKENTRACKER_HTTP_TIMEOUT_MS;
+    else process.env.TOKENTRACKER_HTTP_TIMEOUT_MS = prevTimeout;
+  }
+});
+
+test("a rejected token refresh is tagged transient-auth, not signed-out", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  seedSignedInTracker();
+
+  const realFetch = global.fetch;
+  global.fetch = async (urlStr) => {
+    if (String(urlStr).includes("/api/auth/refresh")) {
+      return { ok: false, status: 401, json: async () => ({ error: "token consumed" }) };
+    }
+    throw new Error(`unexpected fetch ${urlStr}`);
+  };
+  try {
+    const handler = freshHandler(queuePath);
+    const res = await call(handler, { endpoint: HEATMAP_ENDPOINT });
+    assert.equal(res._headers["x-tokentracker-account-view"], "0");
+    assert.equal(
+      res._headers["x-tokentracker-account-fallback"],
+      "transient-auth",
+      "A rejected refresh must never look like the user signing out.",
+    );
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test("an offline account read is tagged transient-network", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  seedSignedInTracker();
+
+  const realFetch = global.fetch;
+  global.fetch = async () => {
+    throw new TypeError("fetch failed");
+  };
+  try {
+    const handler = freshHandler(queuePath);
+    const res = await call(handler, { endpoint: HEATMAP_ENDPOINT });
+    assert.equal(res._headers["x-tokentracker-account-view"], "0");
+    assert.equal(res._headers["x-tokentracker-account-fallback"], "transient-network");
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test("a successful account read carries no fallback header", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  seedSignedInTracker();
+
+  const accessJwt = freshAccessJwt();
+  const payload = { weeks: [], active_days: 3 };
+  const realFetch = global.fetch;
+  global.fetch = async (urlStr) => {
+    if (String(urlStr).includes("/api/auth/refresh")) {
+      return { ok: true, status: 200, json: async () => ({ accessToken: accessJwt }) };
+    }
+    if (String(urlStr).includes("/functions/tokentracker-account-heatmap")) {
+      return { ok: true, status: 200, json: async () => payload };
+    }
+    throw new Error(`unexpected fetch ${urlStr}`);
+  };
+  try {
+    const handler = freshHandler(queuePath);
+    const res = await call(handler, { endpoint: HEATMAP_ENDPOINT });
+    assert.equal(res._headers["x-tokentracker-account-view"], "1");
+    assert.equal(res._headers["x-tokentracker-account-fallback"], undefined);
+    assert.deepEqual(res.json(), payload);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test("one popover refresh mints ONE access token across concurrent account reads", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  seedSignedInTracker();
+
+  const accessJwt = freshAccessJwt();
+  let refreshCalls = 0;
+  const realFetch = global.fetch;
+  global.fetch = async (urlStr) => {
+    const u = String(urlStr);
+    if (u.includes("/api/auth/refresh")) {
+      refreshCalls += 1;
+      // Rotate on every call: a second refresh with the same (already consumed)
+      // token is exactly what used to fail intermittently.
+      if (refreshCalls > 1) return { ok: false, status: 401, json: async () => ({ error: "consumed" }) };
+      await new Promise((r) => setTimeout(r, 5));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ accessToken: accessJwt, refreshToken: "rotated-1" }),
+      };
+    }
+    if (u.includes("/functions/tokentracker-account-")) {
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+    throw new Error(`unexpected fetch ${urlStr}`);
+  };
+  try {
+    const handler = freshHandler(queuePath);
+    const endpoints = [
+      HEATMAP_ENDPOINT,
+      "/functions/tokentracker-usage-daily?from=2026-04-20&to=2026-04-20&tz=UTC&account=1",
+      "/functions/tokentracker-usage-monthly?from=2026-04-01&to=2026-04-30&tz=UTC&account=1",
+      "/functions/tokentracker-usage-model-breakdown?from=2026-04-20&to=2026-04-20&tz=UTC&account=1",
+    ];
+    const results = await Promise.all(endpoints.map((endpoint) => call(handler, { endpoint })));
+    assert.equal(refreshCalls, 1, "concurrent account reads must share one token refresh");
+    for (const res of results) {
+      assert.equal(res._headers["x-tokentracker-account-view"], "1");
+    }
+  } finally {
+    global.fetch = realFetch;
+  }
+});

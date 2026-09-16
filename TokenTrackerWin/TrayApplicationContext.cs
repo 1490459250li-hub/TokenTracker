@@ -63,6 +63,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private UsagePoller.UsageStats? _lastStats;
     private string? _lastLimitsJson;
+    private bool _isSyncing;
     private string _localePreference = NativeLocalization.CurrentPreference;
     private string _themePreference = NativeTheme.CurrentPreference;
     private TrayStrings _strings = TrayStrings.For(NativeLocalization.CurrentResolvedLocale);
@@ -80,6 +81,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
     // WebView (to read the currency) once the dashboard has been opened.
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 2000 };
     private readonly System.Windows.Forms.Timer _syncTimer = new() { Interval = 5 * 60 * 1000 };
+    // Tray apps stay resident for days, so the launch-time update check alone can
+    // miss releases for as long as the app runs. Re-check periodically; the checker
+    // self-skips while a check/download is already in flight.
+    private const int UpdateCheckIntervalMinutes = 6 * 60;
+    private readonly System.Windows.Forms.Timer _updateCheckTimer = new()
+    {
+        Interval = UpdateCheckIntervalMinutes * 60 * 1000,
+    };
+    // WebView currency reads are asynchronous. Timer ticks, menu opens, and
+    // poller callbacks can arrive while one read is still pending; keep one
+    // pass active and request one follow-up pass for the newest stats instead
+    // of stacking ExecuteScript calls on the WebView renderer.
+    private Task? _summaryRefreshTask;
+    private bool _summaryRefreshRequested;
 
     public TrayApplicationContext(bool showPetOnLaunch = false)
     {
@@ -223,11 +238,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _ = _server.EnsureServerRunningAsync();
 
         // Click-to-update: keep the menu item in sync with the checker, quit when it's
-        // ready to hand off to the installer, and run one quiet check on launch (the
-        // checker self-skips dev builds and only surfaces availability — never auto-installs).
-        _updateChecker.Changed += () => PostToUi(RefreshUpdateMenuItem);
+        // ready to hand off to the installer, and run one quiet check on launch. The
+        // checker self-skips dev builds; installed builds auto-install when enabled.
+        _updateChecker.Changed += () => PostToUi(() =>
+        {
+            RefreshUpdateMenuItem();
+            PushDashboardNativeSettings();
+        });
         _updateChecker.QuitRequested += () => PostToUi(Quit);
         _ = _updateChecker.CheckAsync(silent: true);
+        _updateCheckTimer.Tick += (_, _) => _ = _updateChecker.CheckAsync(silent: true);
+        _updateCheckTimer.Start();
 
         // The desktop pet is the app's visible presence now — the dashboard no longer
         // auto-opens. A stored preference (user toggled the pet at least once) always
@@ -605,7 +626,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         if (_dashboard is not null) return;
         var dashboard = new DashboardWindow(_server);
         _dashboard = dashboard;
-        dashboard.ReleasedForIdle += OnDashboardReleasedForIdle;
         // Re-render the cost when the dashboard reports a currency change (and once
         // it has loaded, so we pick up the user's chosen currency right away), and cache
         // it natively so a future cold-launched pet shows the same unit before the
@@ -616,15 +636,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _dashboard.ThemeChanged += () => PostToUi(RefreshThemeFromDashboard);
         _dashboard.PetSettingsRequested += () => PostToUi(PushDashboardPetSettings);
         _dashboard.PetSettingChanged += (key, value) => PostToUi(() => ApplyDashboardPetSetting(key, value));
+        _dashboard.NativeSettingsRequested += () => PostToUi(PushDashboardNativeSettings);
+        _dashboard.NativeSettingChanged += (key, value) => PostToUi(() => ApplyDashboardNativeSetting(key, value));
+        _dashboard.NativeActionRequested += name => PostToUi(() => RunDashboardNativeAction(name));
         _dashboard.NotificationRequested += (title, body) => PostToUi(() =>
             _trayIcon.ShowBalloonTip(7000, title, body, ToolTipIcon.Warning));
     }
 
-    private void OnDashboardReleasedForIdle(DashboardWindow dashboard)
+    /// <summary>
+    /// Recreate the visible dashboard WebView after a narrowly classified
+    /// disposal race reaches WPF's dispatcher-level handler.
+    /// </summary>
+    internal bool RecoverDashboardWebView(Exception exception)
     {
-        if (!ReferenceEquals(_dashboard, dashboard)) return;
-        dashboard.ReleasedForIdle -= OnDashboardReleasedForIdle;
-        _dashboard = null;
+        if (_dashboard is null) return false;
+        return _dashboard.RecoverFromDispatcherException(exception);
     }
 
     private void ApplyDashboardPetSetting(string key, string? value)
@@ -679,6 +705,76 @@ internal sealed class TrayApplicationContext : ApplicationContext
             PetWindow.CurrentSize,
             PetWindow.CurrentCharacter,
             PetWindow.CurrentBotColor);
+    }
+
+    /// <summary>Send the Windows-native settings consumed by the dashboard.</summary>
+    private void PushDashboardNativeSettings()
+    {
+        if (_dashboard is null) return;
+
+        string? updateStatus = _updateChecker.State switch
+        {
+            UpdateChecker.UpdateState.Checking => _updateStrings.Checking,
+            UpdateChecker.UpdateState.UpdateAvailable => string.Format(
+                _updateStrings.UpdateNow, _updateChecker.LatestVersion ?? ""),
+            UpdateChecker.UpdateState.Downloading => string.Format(
+                _updateStrings.Downloading, _updateChecker.ProgressPercent),
+            UpdateChecker.UpdateState.Installing => _updateStrings.Installing,
+            _ => null,
+        };
+
+        _dashboard.PushNativeSettings(new
+        {
+            platform = "windows",
+            autoUpdateEnabled = _updateChecker.AutoUpdateEnabled,
+            launchAtLogin = LaunchAtStartup.IsEnabled,
+            // Startup can still be toggled from the tray menu; keep the
+            // macOS-specific settings row out of the Windows page.
+            launchAtLoginSupported = false,
+            updateStatus,
+            updateBusy = _updateChecker.State is UpdateChecker.UpdateState.Checking
+                or UpdateChecker.UpdateState.Downloading
+                or UpdateChecker.UpdateState.Installing,
+            isSyncing = _isSyncing,
+            version = _updateChecker.CurrentVersion,
+            // These capabilities are macOS-only. Omitting their controls keeps the
+            // Windows settings page focused on features that are actually supported.
+            dynamicIslandSupported = false,
+            widgetsSupported = false,
+        });
+    }
+
+    private void ApplyDashboardNativeSetting(string key, object? value)
+    {
+        switch (key)
+        {
+            case "autoUpdateEnabled" when value is bool enabled:
+                _updateChecker.AutoUpdateEnabled = enabled;
+                break;
+            case "launchAtLogin" when value is bool launch:
+                if (launch) LaunchAtStartup.Enable();
+                else LaunchAtStartup.Disable();
+                break;
+            default:
+                return;
+        }
+        PushDashboardNativeSettings();
+    }
+
+    private void RunDashboardNativeAction(string name)
+    {
+        switch (name)
+        {
+            case "syncNow":
+                _server.TriggerSync();
+                break;
+            case "checkForUpdates":
+                OnCheckUpdatesClicked();
+                break;
+            case "openAbout":
+                OpenInBrowser(Constants.GitHubUrl);
+                break;
+        }
     }
 
     /// <summary>
@@ -785,6 +881,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
             case UpdateChecker.UpdateState.UpdateAvailable:
                 _checkUpdatesItem.Text = string.Format(_updateStrings.UpdateNow, _updateChecker.LatestVersion);
                 _checkUpdatesItem.Enabled = true;
+                if (_updateChecker.AutoUpdateEnabled && _updateChecker.State == UpdateChecker.UpdateState.UpdateAvailable)
+                {
+                    // An enabled automatic check will immediately start the
+                    // background installer, so a "click the tray to update"
+                    // balloon would be both noisy and misleading.
+                    break;
+                }
                 if (!_updateBalloonShown)
                 {
                     _updateBalloonShown = true;
@@ -838,13 +941,23 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void OnSyncStarted()
     {
-        PostToUi(() => _petWindow?.ApplySyncing(true));
+        _isSyncing = true;
+        PostToUi(() =>
+        {
+            _petWindow?.ApplySyncing(true);
+            PushDashboardNativeSettings();
+        });
     }
 
     private void OnSyncCompleted()
     {
+        _isSyncing = false;
         _poller.RefreshNow();
-        PostToUi(() => _petWindow?.ApplySyncing(false));
+        PostToUi(() =>
+        {
+            _petWindow?.ApplySyncing(false);
+            PushDashboardNativeSettings();
+        });
     }
 
     private void OnStatsUpdated(UsagePoller.UsageStats stats)
@@ -865,7 +978,33 @@ internal sealed class TrayApplicationContext : ApplicationContext
     }
 
     /// <summary>Render the today summary into the menu + tooltip, in the user's currency.</summary>
-    private async void RefreshSummary()
+    private void RefreshSummary()
+    {
+        _summaryRefreshRequested = true;
+        if (_summaryRefreshTask is { IsCompleted: false }) return;
+        _summaryRefreshTask = RefreshSummaryLoopAsync();
+    }
+
+    private async Task RefreshSummaryLoopAsync()
+    {
+        while (_summaryRefreshRequested)
+        {
+            _summaryRefreshRequested = false;
+            try
+            {
+                await RefreshSummaryOnceAsync();
+            }
+            catch (Exception ex)
+            {
+                // WebView2 can be disposed while a script is in flight. Keep
+                // timer/menu callbacks harmless and leave the last summary
+                // visible until the next successful pass.
+                DiagLog($"RefreshSummary failed: {ex}");
+            }
+        }
+    }
+
+    private async Task RefreshSummaryOnceAsync()
     {
         // Convert USD → the dashboard's chosen currency. Reading the currency is a
         // WebView2 ExecuteScript round-trip — the 2s _refreshTimer would otherwise
@@ -907,11 +1046,23 @@ internal sealed class TrayApplicationContext : ApplicationContext
     /// <summary>Cache the dashboard's current currency natively so a cold-launched pet
     /// (no dashboard WebView yet) can show the right unit. Only called from the
     /// CurrencyChanged handler, where the read reflects a real, loaded value.</summary>
-    private async void PersistCurrencyFromDashboard()
+    private void PersistCurrencyFromDashboard()
     {
-        if (_dashboard is null) return;
-        var (symbol, rate) = await _dashboard.ReadCurrencyAsync();
-        Currency.Persist(symbol, rate);
+        _ = PersistCurrencyFromDashboardAsync();
+    }
+
+    private async Task PersistCurrencyFromDashboardAsync()
+    {
+        try
+        {
+            if (_dashboard is null) return;
+            var (symbol, rate) = await _dashboard.ReadCurrencyAsync();
+            Currency.Persist(symbol, rate);
+        }
+        catch (Exception ex)
+        {
+            DiagLog($"PersistCurrency failed: {ex.Message}");
+        }
     }
 
     private void PostToUi(Action action)
@@ -998,6 +1149,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             _refreshTimer.Dispose();
             _syncTimer.Dispose();
+            _updateCheckTimer.Dispose();
             _poller.Dispose();
             _server.Dispose();
             _trayIcon.Dispose();

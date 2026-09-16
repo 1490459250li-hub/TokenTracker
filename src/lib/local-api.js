@@ -14,6 +14,11 @@ const { accountSlugFor, fetchAccountUsage, mintAccessToken } = require("./cloud-
 const { getOrCreateMachineId, computeStableMachineId } = require("./machine-id");
 
 const SYNC_TIMEOUT_MS = 120_000;
+// A failed account-view request should not stall every dashboard refresh
+// while an expired session or unreachable backend keeps timing out. The first
+// request still falls back normally; subsequent fan-out requests reuse that
+// decision for a short cooldown and return local data immediately.
+const ACCOUNT_VIEW_FAILURE_BACKOFF_MS = 2 * 60_000;
 const TRACKER_BIN = path.resolve(__dirname, "../../bin/tracker.js");
 const MAX_DEVICE_NAME_LENGTH = 128;
 
@@ -219,8 +224,12 @@ function normalizeQueueRow(row) {
   // non-zero billable usage (GitHub issue #106). Treat billing and usage as
   // orthogonal: bump billable up to total_tokens at read time so historical
   // queue.jsonl entries render correctly without requiring a file rewrite.
+  // Antigravity had the same symptom from e69e2746a (billable deleted during
+  // the O(N) refactoring, leaving 167 local rows with billable=0 until the
+  // parser fix). Apply the same read-time healing so upgraded installs show
+  // correct heatmap / rolling numbers without a queue rewrite.
   const sourceName = String(normalized.source || "").toLowerCase();
-  if (sourceName === "cursor") {
+  if (sourceName === "cursor" || sourceName === "antigravity") {
     const totalTokens = Number(normalized.total_tokens || 0);
     const billable = Number(normalized.billable_total_tokens || 0);
     if (totalTokens > 0 && billable < totalTokens) {
@@ -1135,6 +1144,30 @@ function createLocalApiHandler({ queuePath }) {
   const cookiePath = path.join(trackerDataDir, "relay-cookies.json");
   const localSyncDeviceTokenCache = new Map();
   const localSyncDeviceTokenInflight = new Map();
+  // A dashboard refresh fans out to several account-view endpoints. Keep the
+  // circuit-breaker state per session instead of one global slot (a successful
+  // request for one account must not clear another account's failure), and
+  // suppress the duplicate fan-out while the first cloud probe is pending.
+  const accountViewFailures = new Map();
+  const accountViewInFlight = new Set();
+
+  function accountViewFailureUntil(failureKey) {
+    const until = accountViewFailures.get(failureKey) || 0;
+    if (until > Date.now()) return until;
+    if (until) accountViewFailures.delete(failureKey);
+    return 0;
+  }
+
+  function rememberAccountViewFailure(failureKey) {
+    accountViewFailures.set(failureKey, Date.now() + ACCOUNT_VIEW_FAILURE_BACKOFF_MS);
+    // Refresh-token rotation or account switching can produce many keys over a
+    // long-lived tray session. Bound the map without affecting the active key.
+    while (accountViewFailures.size > 16) {
+      const oldest = accountViewFailures.keys().next().value;
+      if (!oldest || oldest === failureKey) break;
+      accountViewFailures.delete(oldest);
+    }
+  }
 
   // Load persisted cookies on startup
   try {
@@ -1399,15 +1432,52 @@ function createLocalApiHandler({ queuePath }) {
     }
   }
 
-  // Returns "served" when the cross-device aggregate was written to `res`, or
-  // "fallthrough" when the caller should serve the local single-machine data.
-  // Any failure (not signed in, cloud sync off, network/auth error) falls
-  // through so the popover always renders something.
+  // Why a *classified* fallback: the native popover keeps the last successful
+  // account (cross-device) snapshot on screen when a cloud read fails
+  // transiently, but must switch to this-machine data the moment the user signs
+  // out or turns cloud sync off. Both used to look identical from the outside
+  // (HTTP 200 + local payload + `X-TokenTracker-Account-View: 0`), so a single
+  // timed-out read silently shrank Activity to one device until the next
+  // manual sync. See ACCOUNT_FALLBACK_* below for the vocabulary.
+  const ACCOUNT_FALLBACK_CLOUD_SYNC_OFF = "cloud-sync-off";
+  const ACCOUNT_FALLBACK_SIGNED_OUT = "signed-out";
+
+  // Every transient reason is prefixed "transient-"; clients only need the
+  // prefix, so new reasons can be added without a client change.
+  function classifyAccountFallback(err) {
+    if (!err) return "transient-error";
+    if (err.name === "AbortError" || err.name === "TimeoutError" || err.code === "auth_timeout") {
+      return "transient-timeout";
+    }
+    if (err.code === "auth_rejected" || err.code === "auth_invalid" || err.status === 401 || err.status === 403) {
+      return "transient-auth";
+    }
+    if (err.code === "auth_network") return "transient-network";
+    if (Number.isFinite(err.status) && err.status > 0) return "transient-upstream";
+    return "transient-network";
+  }
+
+  // Returns "served" when the cross-device aggregate was written to `res`,
+  // otherwise a fallback reason (see above) telling the caller — and, through
+  // the `X-TokenTracker-Account-Fallback` header, the popover — why the local
+  // single-machine data is being served instead.
   async function tryServeAccountView(usageSlug, url, res) {
-    if (!getCloudSyncPref()) return "fallthrough";
+    if (!getCloudSyncPref()) return ACCOUNT_FALLBACK_CLOUD_SYNC_OFF;
     const refreshToken = getRefreshTokenForCloud();
-    if (!refreshToken) return "fallthrough";
+    if (!refreshToken) return ACCOUNT_FALLBACK_SIGNED_OUT;
     const runtime = resolveRuntimeConfig();
+    const failureKey = `${runtime.baseUrl}\0${refreshToken}`;
+    const requestKey = `${failureKey}\0${usageSlug}\0${url.searchParams.toString()}`;
+    if (accountViewFailureUntil(failureKey) > Date.now()) {
+      return "transient-backoff";
+    }
+    // Six native dashboard requests normally arrive together. If the cloud is
+    // already being probed for this session, let the remaining requests use
+    // their local fallback instead of opening more timeout-bound sockets.
+    if (accountViewInFlight.has(requestKey)) {
+      return "transient-inflight";
+    }
+    accountViewInFlight.add(requestKey);
     const envTimeout = process.env.TOKENTRACKER_HTTP_TIMEOUT_MS
       ? parseInt(process.env.TOKENTRACKER_HTTP_TIMEOUT_MS, 10)
       : 0;
@@ -1421,9 +1491,16 @@ function createLocalApiHandler({ queuePath }) {
         refreshToken,
         timeoutMs,
       });
-      if (!out || out.data == null) return "fallthrough";
+      // `null` here means the slug has no cloud equivalent, or the session
+      // vanished mid-request — a routing/session fact, not an outage.
+      if (!out) return ACCOUNT_FALLBACK_SIGNED_OUT;
+      if (out.data == null) {
+        rememberAccountViewFailure(failureKey);
+        return "transient-upstream";
+      }
       if (out.rotatedRefreshToken) setRelayRefreshToken(out.rotatedRefreshToken);
       if (out.rotatedCsrfToken) setRelayCsrfToken(out.rotatedCsrfToken);
+      accountViewFailures.delete(failureKey);
       res.writeHead(200, {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
@@ -1433,11 +1510,17 @@ function createLocalApiHandler({ queuePath }) {
       return "served";
     } catch (e) {
       // Signed in + cloud sync on, but the cloud read failed (offline, token
-      // rejected, edge error, or timeout). Fall back to local data rather than erroring.
+      // rejected, edge error, or timeout). Serve local data rather than
+      // erroring, but say so: this is a *temporary* downgrade and the client
+      // must not treat it as the user's real data scope.
+      const reason = classifyAccountFallback(e);
       if (resolveRuntimeConfig().debug) {
-        console.warn(`[LocalAPI] account view fallback for ${usageSlug}:`, e?.message || e);
+        console.warn(`[LocalAPI] account view fallback (${reason}) for ${usageSlug}:`, e?.message || e);
       }
-      return "fallthrough";
+      rememberAccountViewFailure(failureKey);
+      return reason;
+    } finally {
+      accountViewInFlight.delete(requestKey);
     }
   }
 
@@ -1936,6 +2019,9 @@ function createLocalApiHandler({ queuePath }) {
         const publishAccount =
           background && body.publishAccount === true && getCloudSyncPref();
         const allLocalSources = background && body.allLocalSources === true;
+        if (background && body.nativeOnlyWsl === true) {
+          extraEnv.TOKENTRACKER_WSL_MODE = "native-only";
+        }
         if (typeof body.deviceToken === "string" && body.deviceToken.trim()) {
           extraEnv.TOKENTRACKER_DEVICE_TOKEN = body.deviceToken.trim();
         }
@@ -2006,14 +2092,17 @@ function createLocalApiHandler({ queuePath }) {
     // --- account (cross-device) view proxy for the native popover ---
     // When ?account=1 and the user is signed in with cloud sync on, serve the
     // same cross-device aggregate the dashboard shows; otherwise tag the
-    // response (X-TokenTracker-Account-View: 0) so the popover knows it got
-    // local single-machine data, and fall through to the local handler below.
+    // response (X-TokenTracker-Account-View: 0 plus an
+    // X-TokenTracker-Account-Fallback reason) so the popover knows it got local
+    // single-machine data and whether that is permanent (signed out / cloud
+    // sync off) or transient, and fall through to the local handler below.
     if (url.searchParams.get("account") === "1") {
       const usageSlug = p.startsWith("/functions/") ? p.slice("/functions/".length) : "";
       if (accountSlugFor(usageSlug)) {
         const result = await tryServeAccountView(usageSlug, url, res);
         if (result === "served") return true;
         res.setHeader("X-TokenTracker-Account-View", "0");
+        res.setHeader("X-TokenTracker-Account-Fallback", result);
       }
     }
 
@@ -2291,6 +2380,8 @@ function createLocalApiHandler({ queuePath }) {
         ma.totals.cached_input_tokens += row.cached_input_tokens || 0;
         ma.totals.cache_creation_input_tokens += row.cache_creation_input_tokens || 0;
         ma.totals.reasoning_output_tokens += row.reasoning_output_tokens || 0;
+        ma.totals.total_cost_usd = Number(ma.totals.total_cost_usd || 0)
+          + (Number(row.total_cost_usd) || 0);
       }
 
       const sources = Array.from(bySource.values()).map((s) => {
@@ -2880,6 +2971,63 @@ function createLocalApiHandler({ queuePath }) {
       return true;
     }
 
+    // --- subscription manager (manual billing plans, issue #460) ---
+    // User-entered renewal/expiry dates. Local-only store that lives next to
+    // queue.jsonl; distinct from usage-limits window resets and the
+    // auto-detected subscriptions in subscriptions.js.
+    if (p === "/functions/tokentracker-subscription-manager") {
+      const method = String(req.method || "GET").toUpperCase();
+      const manager = require("./subscription-manager");
+      const trackerDir = path.dirname(qp);
+      try {
+        if (method === "GET") {
+          json(res, { subscriptions: await manager.listSubscriptions({ trackerDir }) });
+          return true;
+        }
+        if (method === "POST") {
+          if (!isAuthorizedLocalMutation(req)) {
+            json(res, { ok: false, error: "Unauthorized" }, 401);
+            return true;
+          }
+          const body = await readJsonBody(req);
+          if (body?.action === "create") {
+            json(res, {
+              ok: true,
+              subscription: await manager.createSubscription({
+                trackerDir,
+                fields: body.subscription || body,
+              }),
+            });
+            return true;
+          }
+          if (body?.action === "update") {
+            json(res, {
+              ok: true,
+              subscription: await manager.updateSubscription({
+                trackerDir,
+                id: body.id,
+                fields: body.subscription || body,
+              }),
+            });
+            return true;
+          }
+          if (body?.action === "delete") {
+            json(res, {
+              ok: true,
+              ...(await manager.deleteSubscription({ trackerDir, id: body.id })),
+            });
+            return true;
+          }
+          json(res, { ok: false, error: "Unknown subscription-manager action" }, 400);
+          return true;
+        }
+        json(res, { ok: false, error: "Method Not Allowed" }, 405);
+      } catch (error) {
+        json(res, { ok: false, error: error?.message || "Subscription operation failed" }, 400);
+      }
+      return true;
+    }
+
     // --- skills manager ---
     if (p === "/functions/tokentracker-skills") {
       const method = String(req.method || "GET").toUpperCase();
@@ -3012,6 +3160,11 @@ function createLocalApiHandler({ queuePath }) {
             json(res, { ok: true, skill: await skills.installSkill(body.skill, body.targets || ["claude", "codex"]) });
             return true;
           }
+          if (action === "update_all") {
+            // Partial success is normal, so this reports per-skill rather than failing.
+            json(res, { ok: true, ...(await skills.updateSkills(Array.isArray(body.ids) ? body.ids : [])) });
+            return true;
+          }
           if (action === "uninstall") {
             json(res, { ok: true, ...(skills.uninstallSkill(body.id) || {}) });
             return true;
@@ -3067,6 +3220,19 @@ function createLocalApiHandler({ queuePath }) {
     if (p === "/functions/tokentracker-usage-limits") {
       const { getUsageLimits, resetUsageLimitsCache } = require("./usage-limits");
       try {
+        // Devin quota is opt-in (Settings > Usage & Limits > Providers). An
+        // explicit devin=1 without local authentication is rejected before any
+        // cache reset or provider work — silently downgrading it to a disabled
+        // response would misreport an enabled client as a disabled provider.
+        // Authorization is evaluated unconditionally so the check never depends
+        // on the user-controlled opt-in flag itself.
+        const localAuthorized = isAuthorizedLocalMutation(req);
+        const devinParam = url.searchParams.get("devin");
+        const devinEnabled = devinParam === "1" || devinParam === "true";
+        if (devinEnabled && !localAuthorized) {
+          json(res, { error: "Unauthorized" }, 401);
+          return true;
+        }
         const refreshParam = url.searchParams.get("refresh");
         const forceRefresh = refreshParam === "1" || refreshParam === "true";
         if (forceRefresh) {
@@ -3079,6 +3245,7 @@ function createLocalApiHandler({ queuePath }) {
           // Punches through the Claude disk fresh-cache (but not the 429
           // cooldown) — an explicit user refresh should hit upstream.
           forceRefresh,
+          devinEnabled,
         });
         json(res, data);
       } catch (e) {

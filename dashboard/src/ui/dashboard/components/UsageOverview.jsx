@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { Info, Loader2, SquareArrowOutUpRight } from "lucide-react";
+import { Info, Loader2, RefreshCw, SquareArrowOutUpRight } from "lucide-react";
 
 // Solid (fill-based) monochrome all-tools mark — matches the fill-based
 // mono provider icons, unlike lucide's stroke-only Layers3. Drawn bold and
@@ -73,6 +73,7 @@ function parseAnimatedCounterValue(displayValue) {
 
 // Provider color mapping for visual distinction
 const PROVIDER_COLORS = {
+  ACODE: "var(--brand-primary-light)",
   CODEX: "#3b82f6",     // blue-500
   DSH: "var(--community-deepseek)", // DeepSeek Harness brand blue
   CLAUDE: "#d97757",    // Anthropic Japonica orange-red
@@ -85,6 +86,8 @@ const PROVIDER_COLORS = {
   DROID: "#ef4444",        // red-500 (Factory brand)
   ZCODE: "#14b8a6",        // teal-500 (Z.ai / GLM — distinct from the blues)
   ANYTHINGLLM: "var(--provider-anythingllm)", // AnythingLLM primary cyan
+  LMSTUDIO: "var(--provider-lmstudio)", // LM Studio icon gradient lead
+  UNSLOTH: "var(--provider-unsloth)",  // Unsloth green
 };
 
 function getProviderColor(label, index) {
@@ -157,9 +160,12 @@ function RefreshButton({ loading, onClick }) {
             ? { duration: 1, repeat: Infinity, ease: "linear" }
             : { duration: 0.3 }
         }
-        style={{ display: "inline-block" }}
+        style={{ display: "inline-flex" }}
       >
-        ↻
+        {/* Real arc geometry: the previous "↻" text glyph is a non-circular,
+            font-dependent shape whose glyph-box center sits off the arc's
+            visual center, so the spin wobbled instead of reading as a circle. */}
+        <RefreshCw className="h-3.5 w-3.5" strokeWidth={2} />
       </motion.span>
     </Button>
   );
@@ -229,6 +235,19 @@ export function UsageOverview({
   const tabs = normalizePeriods(periods);
   const dateLocale = getDateFnsLocale(getCopyLocale());
   const summaryCounterValue = parseAnimatedCounterValue(String(summaryValue ?? ""));
+  // Weeks run Monday–Sunday, so a week selected near a month boundary can
+  // hold more usage than the month-to-date it overlaps. Spell out the covered
+  // dates and flag the straddle so the week/month totals read as different
+  // windows, not as a miscount.
+  const showCrossMonthHint =
+    period === "week" &&
+    typeof from === "string" &&
+    typeof to === "string" &&
+    from.slice(0, 7) !== to.slice(0, 7);
+  const periodRangeLabel =
+    from && to
+      ? `${formatDateShort(from, dateLocale)} — ${formatDateShort(to, dateLocale)}`
+      : null;
   // The digit-by-digit Counter renders at a fixed 72px and would clip on
   // phones. Below sm we drop it and render the plain value, which scales
   // with the responsive font class below. 639px == one below Tailwind's
@@ -313,6 +332,14 @@ export function UsageOverview({
 
   // FleetData is already grouped by provider.
   const providers = fleetData.filter((f) => f.models?.length > 0);
+  // Devin contributes real token counts but its models (swe-2, swe-2-high,
+  // compactor) ship without pricing data, so the dollar figure silently
+  // under-reports whenever Devin is in view — surface the notice on both the
+  // provider drill-down and the combined "All" ranking.
+  const devinContributes = providers.some(
+    (provider) =>
+      String(provider?.source || provider?.label || "").trim().toLowerCase() === "devin",
+  );
   const allModels = useMemo(() => buildAllModels(fleetData), [fleetData]);
   const allUsage = allModels.reduce((sum, model) => sum + (Number(model.usage) || 0), 0);
   const allCost = providers.reduce((sum, provider) => sum + (Number(provider.usd) || 0), 0);
@@ -471,6 +498,14 @@ export function UsageOverview({
               )}
             </div>
           )}
+          {periodRangeLabel ? (
+            <div className="mt-3 flex flex-col items-center gap-1 text-[11px] leading-snug text-oai-gray-400 dark:text-oai-gray-500">
+              <span className="tabular-nums">{periodRangeLabel}</span>
+              {showCrossMonthHint ? (
+                <span>{copy("usage.overview.week_cross_month_hint")}</span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         {/* Provider Distribution */}
@@ -598,6 +633,7 @@ export function UsageOverview({
                 aria-label={copy("usage.overview.all_models")}
                 className="mt-2"
               >
+                {devinContributes && <DevinPricingNotice />}
                 <AllModelsSection models={allModels} />
               </div>
             )}
@@ -720,11 +756,24 @@ function AllModelsSection({ models }) {
   );
 }
 
+function DevinPricingNotice() {
+  return (
+    <p className="mb-3 text-[10px] leading-snug text-oai-gray-400 dark:text-oai-gray-500">
+      <span className="font-medium text-oai-gray-500 dark:text-oai-gray-400">
+        {copy("usage.overview.devin_notice_title")}.
+      </span>{" "}
+      {copy("usage.overview.devin_notice_body")}
+    </p>
+  );
+}
+
 function ProviderExpandedSection({ provider, color, providerHeading, contextSource, from, to, sortedModels }) {
   const { formatTokens } = useTokenFormat();
   const [breakdownLoading, setBreakdownLoading] = useState(false);
   const isAntigravity =
     String(provider?.source || provider?.label || "").trim().toLowerCase() === "antigravity";
+  const isDevin =
+    String(provider?.source || provider?.label || "").trim().toLowerCase() === "devin";
 
   return (
                       <div>
@@ -773,6 +822,12 @@ function ProviderExpandedSection({ provider, color, providerHeading, contextSour
                             {copy("usage.overview.antigravity_notice_body")}
                           </p>
                         )}
+
+                        {/* Devin token counts are real (read from the CLI's local
+                            history), but swe-2/swe-2-high/compactor carry no
+                            verified pricing, so the dollar figure excludes them —
+                            a $0 estimate is not evidence of free usage. */}
+                        {isDevin && <DevinPricingNotice />}
 
                         {/* Context Breakdown drill-down.
                             Claude: category-based (approx /context).

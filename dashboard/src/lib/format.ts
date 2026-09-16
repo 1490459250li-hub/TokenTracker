@@ -64,6 +64,47 @@ export function formatCompactNumber(
   return formatWithSuffix(roundedK, thousandSuffix);
 }
 
+// Chinese Wan/Yi numeral scale: 1e4 (万), 1e8 (亿), 1e12 (万亿). Below one
+// wan the exact digits are more readable than a rounded unit.
+export function formatChineseNumber(
+  value: any,
+  { decimals = 1 }: { decimals?: number } = {},
+) {
+  const n = Number(String(value));
+  if (!Number.isFinite(n)) return "-";
+  const sign = n < 0 ? "-" : "";
+  const abs = Math.abs(n);
+  const safeDecimals = Math.max(0, Math.min(6, Math.floor(decimals)));
+
+  if (abs < 10000) return `${sign}${String(abs)}`;
+
+  const formatWithSuffix = (val: number, suffix: string) => {
+    const fixed = val.toFixed(safeDecimals);
+    const normalized = Number(fixed).toString();
+    return `${sign}${normalized}${suffix}`;
+  };
+
+  if (abs >= 1e12) {
+    return formatWithSuffix(abs / 1e12, "万亿");
+  }
+
+  if (abs >= 1e8) {
+    const yiValue = abs / 1e8;
+    const roundedYi = Number(yiValue.toFixed(safeDecimals));
+    if (roundedYi >= 10000) {
+      return formatWithSuffix(roundedYi / 10000, "万亿");
+    }
+    return `${sign}${roundedYi.toString()}亿`;
+  }
+
+  const wanValue = abs / 10000;
+  const roundedWan = Number(wanValue.toFixed(safeDecimals));
+  if (roundedWan >= 10000) {
+    return formatWithSuffix(roundedWan / 10000, "亿");
+  }
+  return formatWithSuffix(roundedWan, "万");
+}
+
 export function toFiniteNumber(value: any) {
   const n = Number(String(value));
   return Number.isFinite(n) ? n : null;

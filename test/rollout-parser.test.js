@@ -36,6 +36,7 @@ const {
   parseWslListVerbose,
   probeWslDistros,
   discoverWslHermesHome,
+  resolveCopilotOtelPaths,
   parseCopilotIncremental,
   parseKimiIncremental,
   parseCodebuddyIncremental,
@@ -63,6 +64,9 @@ const {
   parseAntigravityIncremental,
   listAntigravitySessionFiles,
   estimateAntigravityTokens,
+  resolveAntigravityDbPath,
+  extractAntigravityGenInfo,
+  readAntigravityConversationDb,
   parseKimiCodeIncremental,
   resolveKimiHome,
   resolveKimiCodeHome,
@@ -73,6 +77,7 @@ const {
   resolveGooseDbPath,
   listRolloutFilesDeep,
   filterColdCodexRolloutFiles,
+  bucketKey,
 } = require("../src/lib/rollout");
 const { purgeProjectUsage } = require("../src/lib/project-usage-purge");
 
@@ -548,6 +553,80 @@ test("parseRolloutIncremental does not double-count a session moved sessions/ ->
     await fs.writeFile(archivedFile, body, "utf8");
     await parseRolloutIncremental({ rolloutFiles: [archivedFile], cursors, queuePath, source: "codex" });
     assert.equal(sumCodex(), afterLive, "archived copy of a counted session must not double-count");
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseRolloutIncremental deduplicates Acode live and archived session copies independently", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-acode-rollout-"));
+  try {
+    const uuid = "019b4e04-2bd1-7661-b050-066f82a96567";
+    const liveDir = path.join(tmp, ".acode", "sessions", "2026", "08", "31");
+    const archiveDir = path.join(tmp, ".acode", "archived_sessions");
+    await fs.mkdir(liveDir, { recursive: true });
+    await fs.mkdir(archiveDir, { recursive: true });
+    const fileName = `rollout-2026-08-31T00-00-00-${uuid}.jsonl`;
+    const liveFile = path.join(liveDir, fileName);
+    const archiveFile = path.join(archiveDir, fileName);
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const cursors = {
+      version: 1,
+      files: {},
+      codexHashes: ["codex-session:2026-08-31T00:00:01.000Z"],
+      updatedAt: null,
+    };
+    const usage = {
+      input_tokens: 100,
+      cached_input_tokens: 40,
+      output_tokens: 20,
+      reasoning_output_tokens: 5,
+      total_tokens: 120,
+    };
+    const body = [
+      buildTurnContextLine({ model: "xopglm52" }),
+      buildTokenCountLine({ ts: "2026-08-31T00:00:01.000Z", last: usage, total: usage }),
+    ].join("\n") + "\n";
+    await fs.writeFile(liveFile, body, "utf8");
+    await fs.writeFile(archiveFile, body, "utf8");
+
+    await parseRolloutIncremental({
+      rolloutFiles: [{ path: liveFile, source: "acode" }],
+      cursors,
+      queuePath,
+    });
+    const afterLive = Object.entries(cursors.hourly.buckets)
+      .filter(([key]) => key.startsWith("acode|"))
+      .reduce((sum, [, bucket]) => sum + bucket.totals.total_tokens, 0);
+    assert.equal(afterLive, usage.total_tokens);
+
+    await parseRolloutIncremental({
+      rolloutFiles: [{ path: archiveFile, source: "acode" }],
+      cursors,
+      queuePath,
+    });
+    const afterArchive = Object.entries(cursors.hourly.buckets)
+      .filter(([key]) => key.startsWith("acode|"))
+      .reduce((sum, [, bucket]) => sum + bucket.totals.total_tokens, 0);
+    assert.equal(afterArchive, afterLive);
+    assert.equal(cursors.acodeHashes.length, 1);
+    assert.deepEqual(cursors.codexHashes, ["codex-session:2026-08-31T00:00:01.000Z"]);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseRolloutIncremental leaves Acode dedup state absent when no Acode files participate", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-acode-cursor-"));
+  try {
+    const cursors = { version: 1, files: {}, updatedAt: null };
+    await parseRolloutIncremental({
+      rolloutFiles: [],
+      cursors,
+      queuePath: path.join(tmp, "queue.jsonl"),
+      source: "codex",
+    });
+    assert.equal(Object.hasOwn(cursors, "acodeHashes"), false);
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
@@ -1363,6 +1442,48 @@ test("parseRolloutIncremental keeps project EOF fast path scoped to codex source
   }
 });
 
+test("parseRolloutIncremental bounds concurrent metadata reads while preserving parse order", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-rollout-stat-"));
+  const realStat = fs.stat;
+  try {
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const rolloutFiles = [];
+    const cursors = { version: 1, files: {}, updatedAt: null };
+    for (let index = 0; index < 40; index += 1) {
+      const rolloutPath = path.join(tmp, `rollout-${String(index).padStart(2, "0")}.jsonl`);
+      await fs.writeFile(rolloutPath, "", "utf8");
+      const stat = await realStat(rolloutPath);
+      rolloutFiles.push(rolloutPath);
+      cursors.files[rolloutPath] = { inode: stat.ino || 0, offset: stat.size };
+    }
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    fs.stat = async function delayedStat(target, ...args) {
+      if (!rolloutFiles.includes(String(target))) {
+        return realStat.call(this, target, ...args);
+      }
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return await realStat.call(this, target, ...args);
+      } finally {
+        inFlight -= 1;
+      }
+    };
+
+    const result = await parseRolloutIncremental({ rolloutFiles, cursors, queuePath });
+    assert.equal(result.filesProcessed, 0);
+    assert.ok(maxInFlight > 1, `expected concurrent stat calls, observed ${maxInFlight}`);
+    assert.ok(maxInFlight <= 32, `stat concurrency must stay bounded, observed ${maxInFlight}`);
+    assert.deepEqual(Object.keys(cursors.files), rolloutFiles);
+  } finally {
+    fs.stat = realStat;
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test("filterColdCodexRolloutFiles skips historical EOF Codex files without statting them", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-rollout-"));
   const realStat = fs.stat;
@@ -2014,6 +2135,74 @@ test("parseRolloutIncremental skips same-day forked replay burst (issue #169 fol
     assert.equal(total, r0.total_tokens + live.total_tokens);
     // Cumulative baseline advanced across the skipped rows so the live delta is intact.
     assert.deepEqual(cursors.files[rolloutPath].lastTotal, cum(r0, r1, r2, live));
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseRolloutIncremental skips same-day forked replay burst for Acode", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-acode-rollout-"));
+  try {
+    const rolloutPath = path.join(tmp, "rollout-2026-06-09T20-46-23-fork.jsonl");
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const cursors = { version: 1, files: {}, updatedAt: null };
+    const usage = (input, output) => ({
+      input_tokens: input,
+      cached_input_tokens: 0,
+      output_tokens: output,
+      reasoning_output_tokens: 0,
+      total_tokens: input + output,
+    });
+    const add = (left, right) => ({
+      input_tokens: left.input_tokens + right.input_tokens,
+      cached_input_tokens: 0,
+      output_tokens: left.output_tokens + right.output_tokens,
+      reasoning_output_tokens: 0,
+      total_tokens: left.total_tokens + right.total_tokens,
+    });
+    const replay0 = usage(100, 10);
+    const replay1 = usage(200, 20);
+    const live = usage(7, 3);
+    const replayTotal = add(replay0, replay1);
+    const liveTotal = add(replayTotal, live);
+
+    const lines = [
+      buildSessionMetaLine({
+        model: "xopglm53",
+        cwd: tmp,
+        forkedFromId: "019e095c-c041-7b40-b7cb-43ddb153086c",
+      }),
+      buildTurnContextLine({ model: "xopglm53", cwd: tmp, currentDate: "2026-06-09" }),
+      buildTokenCountLine({
+        ts: "2026-06-09T20:46:23.100Z",
+        last: replay0,
+        total: replay0,
+      }),
+      buildTokenCountLine({
+        ts: "2026-06-09T20:46:23.101Z",
+        last: replay1,
+        total: replayTotal,
+      }),
+      buildTokenCountLine({
+        ts: "2026-06-09T20:46:53.102Z",
+        last: live,
+        total: liveTotal,
+      }),
+    ];
+    await fs.writeFile(rolloutPath, lines.join("\n") + "\n", "utf8");
+
+    const res = await parseRolloutIncremental({
+      rolloutFiles: [{ path: rolloutPath, source: "acode" }],
+      cursors,
+      queuePath,
+    });
+    assert.equal(res.eventsAggregated, 2);
+
+    const queued = await readJsonLines(queuePath);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].source, "acode");
+    assert.equal(queued[0].total_tokens, replay0.total_tokens + live.total_tokens);
+    assert.deepEqual(cursors.files[rolloutPath].lastTotal, liveTotal);
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
@@ -3145,6 +3334,349 @@ function fakeZcodeSqliteOptions(dbPath, messages) {
   };
 }
 
+function fakeNativeZcodeSqliteOptions(dbPath, usageRows, { completeSchema = true } = {}) {
+  const requiredColumns = [
+    "id", "logical_request_id", "attempt_index", "session_id", "provider_id", "model_id",
+    "status", "started_at", "input_tokens", "output_tokens", "reasoning_tokens",
+    "cache_creation_input_tokens", "cache_read_input_tokens",
+  ];
+  return {
+    execFileSync() {
+      throw new Error("spawn sqlite3 ENOENT");
+    },
+    requireFn(name) {
+      assert.equal(name, "node:sqlite");
+      return {
+        DatabaseSync: class FakeDatabaseSync {
+          constructor(actualDbPath, options) {
+            assert.equal(actualDbPath, dbPath);
+            assert.deepEqual(options, { readOnly: true });
+          }
+          prepare(sql) {
+            return {
+              all() {
+                if (sql.includes("pragma_table_info('model_usage')")) {
+                  const columns = completeSchema ? requiredColumns : requiredColumns.filter((c) => c !== "reasoning_tokens");
+                  return [
+                    ...columns.map((name) => ({ table_name: "model_usage", name })),
+                    { table_name: "session", name: "id" },
+                    { table_name: "session", name: "directory" },
+                  ];
+                }
+                if (/FROM model_usage/i.test(sql)) return usageRows;
+                if (/session_message/i.test(sql)) return [{ hasRows: 0, sessionTable: "session" }];
+                if (/FROM message/i.test(sql)) return [];
+                throw new Error(`unexpected SQL: ${sql}`);
+              },
+            };
+          }
+          close() {}
+        },
+      };
+    },
+    stderr: { write() {} },
+  };
+}
+
+test("readZcodeDbMessages prefers complete native model_usage rows and keeps token columns", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-zcode-native-"));
+  try {
+    const dbPath = path.join(tmp, "db.sqlite");
+    await fs.writeFile(dbPath, "", "utf8");
+    const rows = readZcodeDbMessages(dbPath, fakeNativeZcodeSqliteOptions(dbPath, [
+      {
+        id: "usage-1", logical_request_id: "logical-1", attempt_index: 0,
+        session_id: "session-1", provider_id: "builtin:zai-start-plan", model_id: "GLM-5.2",
+        started_at: Date.parse("2026-06-15T09:00:00.000Z"), input_tokens: 100,
+        output_tokens: 20, reasoning_tokens: 5, cache_creation_input_tokens: 10,
+        cache_read_input_tokens: 30, directory: "/work/project",
+      },
+      {
+        id: "usage-subagent", logical_request_id: "logical-2", attempt_index: 0,
+        session_id: "session-2", provider_id: "anthropic", model_id: "claude-opus-4-8",
+        started_at: Date.parse("2026-06-15T09:01:00.000Z"), input_tokens: 999,
+        output_tokens: 99, reasoning_tokens: 0, cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0, directory: "/work/project",
+      },
+    ]));
+
+    assert.equal(rows.length, 1, "bundled Claude/Codex/Gemini providers remain excluded");
+    assert.equal(rows[0].id, "usage-1");
+    assert.equal(rows[0].sessionID, "session-1");
+    assert.equal(rows[0].data.modelID, "GLM-5.2");
+    assert.equal(rows[0].data.providerID, "builtin:zai-start-plan");
+    assert.deepEqual(rows[0].data.tokens, {
+      input: 60,
+      output: 15,
+      reasoning: 5,
+      cache: { read: 30, write: 10 },
+    });
+    assert.equal(rows[0].data.path.cwd, "/work/project");
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("readZcodeDbMessages falls back when model_usage schema is incomplete", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-zcode-native-fallback-"));
+  try {
+    const dbPath = path.join(tmp, "db.sqlite");
+    await fs.writeFile(dbPath, "", "utf8");
+    const rows = readZcodeDbMessages(
+      dbPath,
+      fakeNativeZcodeSqliteOptions(dbPath, [], { completeSchema: false }),
+    );
+    assert.deepEqual(rows, []);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("readZcodeDbMessages queries a real native schema and ignores unfinished requests", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-zcode-native-sql-"));
+  try {
+    const dbPath = path.join(tmp, "db.sqlite");
+    runSqliteWrite(dbPath, `
+      CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+      CREATE TABLE model_usage (
+        id TEXT PRIMARY KEY,
+        logical_request_id TEXT NOT NULL,
+        attempt_index INTEGER NOT NULL DEFAULT 0,
+        session_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_input_tokens INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO session VALUES ('session-real', '/real/project');
+      INSERT INTO model_usage VALUES
+        ('done', 'logical-done', 0, 'session-real', 'builtin:zai-start-plan', 'GLM-5.2',
+         'completed', 1781514000000, 101, 21, 6, 11, 31),
+        ('running', 'logical-running', 0, 'session-real', 'builtin:zai-start-plan', 'GLM-5.2',
+         'running', 1781514060000, 999, 99, 0, 0, 0);
+    `);
+
+    const rows = readZcodeDbMessages(dbPath);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, "done");
+    assert.equal(rows[0].data.path.cwd, "/real/project");
+    assert.deepEqual(rows[0].data.tokens, {
+      input: 59,
+      output: 15,
+      reasoning: 6,
+      cache: { read: 31, write: 11 },
+    });
+
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const cursors = { version: 1, files: {}, updatedAt: null };
+    const first = await parseOpencodeDbIncremental({
+      dbMessages: rows,
+      dbPath,
+      cursors,
+      queuePath,
+      source: "zcode",
+      cursorKey: "zcode",
+    });
+    assert.equal(first.bucketsQueued, 1);
+    const [queued] = await readJsonLines(queuePath);
+    assert.equal(queued.source, "zcode");
+    assert.equal(queued.input_tokens, 59);
+    assert.equal(queued.output_tokens, 15);
+    assert.equal(queued.reasoning_output_tokens, 6);
+    assert.equal(queued.cached_input_tokens, 31);
+    assert.equal(queued.cache_creation_input_tokens, 11);
+    assert.equal(queued.total_tokens, 122);
+
+    const beforeSecondRun = await fs.readFile(queuePath, "utf8");
+    const second = await parseOpencodeDbIncremental({
+      dbMessages: readZcodeDbMessages(dbPath),
+      dbPath,
+      cursors,
+      queuePath,
+      source: "zcode",
+      cursorKey: "zcode",
+    });
+    assert.equal(second.bucketsQueued, 0);
+    assert.equal(await fs.readFile(queuePath, "utf8"), beforeSecondRun);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("readZcodeDbMessages preserves legacy history before native model_usage begins", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-zcode-native-history-"));
+  try {
+    const dbPath = path.join(tmp, "db.sqlite");
+    const legacyBeforeNative = {
+      id: "legacy-before-native",
+      sessionID: "session-real",
+      role: "assistant",
+      providerID: "builtin:zai-start-plan",
+      modelID: "GLM-5.2",
+      time: { created: 1781514000000, completed: 1781514060000 },
+      tokens: { input: 70, output: 10, reasoning: 0, cache: { read: 20, write: 0 } },
+    };
+    const legacyCoveredByNative = {
+      ...legacyBeforeNative,
+      id: "legacy-covered-by-native",
+      time: { created: 1787105605912, completed: 1787105665912 },
+    };
+    const beforeJson = JSON.stringify(legacyBeforeNative).replace(/'/g, "''");
+    const coveredJson = JSON.stringify(legacyCoveredByNative).replace(/'/g, "''");
+    runSqliteWrite(dbPath, `
+      CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+      CREATE TABLE message (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        time_created INTEGER NOT NULL,
+        time_updated INTEGER NOT NULL,
+        data TEXT NOT NULL
+      );
+      CREATE TABLE model_usage (
+        id TEXT PRIMARY KEY,
+        logical_request_id TEXT NOT NULL,
+        attempt_index INTEGER NOT NULL DEFAULT 0,
+        session_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_input_tokens INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO session VALUES ('session-real', '/real/project');
+      INSERT INTO message VALUES
+        ('legacy-before-native', 'session-real', 1781514000000, 1781514060000, '${beforeJson}'),
+        ('legacy-covered-by-native', 'session-real', 1787105605912, 1787105665912, '${coveredJson}');
+      INSERT INTO model_usage VALUES
+        ('native', 'logical-native', 0, 'session-real', 'builtin:zai-start-plan', 'GLM-5.3',
+         'completed', 1787105605912, 101, 21, 6, 11, 31);
+    `);
+
+    const rows = readZcodeDbMessages(dbPath);
+    assert.deepEqual(rows.map((row) => row.id), ["legacy-before-native", "native"]);
+    assert.equal(rows[0].data.modelID, "GLM-5.2");
+    assert.equal(rows[1].data.modelID, "GLM-5.3");
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("readZcodeDbMessages snapshots native model_usage DBs on UNC paths", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-zcode-native-unc-"));
+  try {
+    const dbPath = path.join(tmp, "db.sqlite");
+    runSqliteWrite(dbPath, `
+      CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+      CREATE TABLE model_usage (
+        id TEXT PRIMARY KEY,
+        logical_request_id TEXT NOT NULL,
+        attempt_index INTEGER NOT NULL DEFAULT 0,
+        session_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_input_tokens INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO session VALUES ('session-unc', '/unc/project');
+      INSERT INTO model_usage VALUES
+        ('usage-unc', 'logical-unc', 0, 'session-unc', 'builtin:zai-start-plan', 'GLM-5.2',
+         'completed', 1781514000000, 80, 20, 5, 10, 20);
+    `);
+    const uncStyle = process.platform === "win32" ? `\\\\?\\${dbPath}` : `/${dbPath}`;
+    const rows = readZcodeDbMessages(uncStyle);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, "usage-unc");
+    assert.deepEqual(rows[0].data.tokens, {
+      input: 50,
+      output: 15,
+      reasoning: 5,
+      cache: { read: 20, write: 10 },
+    });
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("readZcodeDbMessages preserves normalized legacy history before native model_usage begins", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-zcode-native-history-"));
+  try {
+    const dbPath = path.join(tmp, "db.sqlite");
+    const legacyBeforeNative = {
+      id: "legacy-before-native",
+      sessionID: "session-real",
+      role: "assistant",
+      providerID: "builtin:zai-start-plan",
+      modelID: "GLM-5.2",
+      time: { created: 1781514000000, completed: 1781514060000 },
+      tokens: { input: 70, output: 14, reasoning: 4, cache: { read: 20, write: 10 } },
+    };
+    const legacyCoveredByNative = {
+      ...legacyBeforeNative,
+      id: "legacy-covered-by-native",
+      time: { created: 1787105605912, completed: 1787105665912 },
+    };
+    const beforeJson = JSON.stringify(legacyBeforeNative).replace(/'/g, "''");
+    const coveredJson = JSON.stringify(legacyCoveredByNative).replace(/'/g, "''");
+    runSqliteWrite(dbPath, `
+      CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+      CREATE TABLE message (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        time_created INTEGER NOT NULL,
+        time_updated INTEGER NOT NULL,
+        data TEXT NOT NULL
+      );
+      CREATE TABLE model_usage (
+        id TEXT PRIMARY KEY,
+        logical_request_id TEXT NOT NULL,
+        attempt_index INTEGER NOT NULL DEFAULT 0,
+        session_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_input_tokens INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO session VALUES ('session-real', '/real/project');
+      INSERT INTO message VALUES
+        ('legacy-before-native', 'session-real', 1781514000000, 1781514060000, '${beforeJson}'),
+        ('legacy-covered-by-native', 'session-real', 1787105605912, 1787105665912, '${coveredJson}');
+      INSERT INTO model_usage VALUES
+        ('native', 'logical-native', 0, 'session-real', 'builtin:zai-start-plan', 'GLM-5.3',
+         'completed', 1787105605912, 101, 21, 6, 11, 31);
+    `);
+
+    const rows = readZcodeDbMessages(dbPath);
+    assert.deepEqual(rows.map((row) => row.id), ["legacy-before-native", "native"]);
+    assert.deepEqual(rows[0].data.tokens, {
+      input: 40,
+      output: 10,
+      reasoning: 4,
+      cache: { read: 20, write: 10 },
+    });
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test("readZcodeDbMessages keeps Z.ai/BigModel + third-party rows, drops bundled sub-agent turns", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-zcode-db-"));
   try {
@@ -3182,6 +3714,7 @@ test("readZcodeDbMessages keeps Z.ai/BigModel + third-party rows, drops bundled 
     assert.deepEqual(models, ["GLM-5-Turbo", "GLM-5.2", "fugu-ultra", "mimo-v2.5-pro"]);
     // No bundled anthropic/openai/google sub-agent turn survives the filter.
     assert.ok(!rows.some((r) => /anthropic|openai|google/.test(r.data.providerID)));
+    assert.ok(rows.every((row) => row.data.tokens.input === 50));
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
@@ -3225,7 +3758,7 @@ test("parseOpencodeDbIncremental aggregates ZCode GLM rows into source=zcode buc
     // Model is stored with the DB's original case ("GLM-5.2"); the pricing
     // matcher is case-insensitive so cost still resolves to the curated key.
     assert.equal(queued[0].model, "GLM-5.2");
-    assert.equal(queued[0].input_tokens, 10478);
+    assert.equal(queued[0].input_tokens, 3438);
     assert.equal(queued[0].output_tokens, 203);
     assert.equal(queued[0].cached_input_tokens, 7040);
 
@@ -3608,9 +4141,50 @@ test("parseRolloutIncremental subtracts cached_input_tokens from Codex input_tok
     assert.equal(queued[0].cached_input_tokens, 950_000);
     assert.equal(queued[0].output_tokens, 10_000);
     assert.equal(queued[0].reasoning_output_tokens, 4_000);
-    // total_tokens left as reported: still equals non_cached + cached + output
-    // numerically, so downstream aggregation stays stable.
+    // The reported total already equals the normalized, mutually-exclusive parts.
     assert.equal(queued[0].total_tokens, 1_010_000);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseRolloutIncremental drops Codex total-only sentinel usage", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-codex-total-sentinel-"));
+  try {
+    const rolloutPath = path.join(tmp, "rollout-codex.jsonl");
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const cursors = { version: 1, files: {}, updatedAt: null };
+    const zero = {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_output_tokens: 0,
+      total_tokens: 0,
+    };
+    const sentinel = { ...zero, total_tokens: 4_442 };
+    const valid = { ...zero, input_tokens: 100, output_tokens: 10, total_tokens: 110 };
+
+    await fs.writeFile(
+      rolloutPath,
+      [
+        buildTokenCountLine({ ts: "2026-08-04T12:58:55.420Z", last: sentinel, total: zero }),
+        buildTokenCountLine({ ts: "2026-08-04T12:59:06.736Z", last: valid, total: valid }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    await parseRolloutIncremental({
+      rolloutFiles: [{ path: rolloutPath, source: "codex" }],
+      cursors,
+      queuePath,
+    });
+
+    const queued = await readJsonLines(queuePath);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].input_tokens, 100);
+    assert.equal(queued[0].output_tokens, 10);
+    assert.equal(queued[0].total_tokens, 110);
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
@@ -3752,6 +4326,56 @@ test("parseRolloutIncremental keeps buckets separate per model within the same h
     assert.ok(byModel.has("gpt-4o-mini"));
     assert.equal(byModel.get("gpt-4o").total_tokens, usage1.total_tokens);
     assert.equal(byModel.get("gpt-4o-mini").total_tokens, usage2.total_tokens);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseRolloutIncremental persists selected-model state and bills an observed reroute to the effective model", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-codex-reroute-"));
+  try {
+    const rolloutPath = path.join(tmp, "rollout-reroute.jsonl");
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const cursors = { version: 1, files: {}, updatedAt: null };
+    await fs.writeFile(
+      rolloutPath,
+      `${buildTurnContextLine({ model: "gpt-5.6-sol" })}\n`,
+      "utf8",
+    );
+    await parseRolloutIncremental({ rolloutFiles: [rolloutPath], cursors, queuePath });
+
+    const usage = {
+      input_tokens: 100,
+      cached_input_tokens: 0,
+      output_tokens: 20,
+      reasoning_output_tokens: 0,
+      total_tokens: 120,
+    };
+    const reroute = JSON.stringify({
+      timestamp: "2025-12-17T00:04:59.000Z",
+      method: "model/rerouted",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        fromModel: "gpt-5.6-sol",
+        toModel: "gpt-5.6-terra",
+        reason: "capacity",
+      },
+    });
+    await fs.appendFile(
+      rolloutPath,
+      `${reroute}\n${buildTokenCountLine({ ts: "2025-12-17T00:05:00.000Z", last: usage, total: usage })}\n`,
+      "utf8",
+    );
+    await parseRolloutIncremental({ rolloutFiles: [rolloutPath], cursors, queuePath });
+
+    const queued = await readJsonLines(queuePath);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].model, "gpt-5.6-terra");
+    assert.equal(queued[0].total_tokens, 120);
+    const cursor = cursors.files[rolloutPath];
+    assert.equal(cursor.modelAttributionState.selectedModel, "gpt-5.6-sol");
+    assert.equal(cursor.modelAttributionState.effectiveModel, "gpt-5.6-terra");
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
@@ -5857,6 +6481,36 @@ function makeCopilotChatAttrs({
   return attrs;
 }
 
+test("resolveCopilotOtelPaths discovers both Copilot default locations", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-copilot-paths-"));
+  try {
+    const cliDir = path.join(tmp, ".copilot", "otel");
+    const chatDir = path.join(tmp, ".copilot-otel");
+    const explicitPath = path.join(tmp, "custom", "copilot.jsonl");
+    await fs.mkdir(cliDir, { recursive: true });
+    await fs.mkdir(chatDir, { recursive: true });
+    await fs.mkdir(path.dirname(explicitPath), { recursive: true });
+    await fs.writeFile(path.join(cliDir, "cli.jsonl"), "", "utf8");
+    await fs.writeFile(path.join(chatDir, "copilot.jsonl"), "", "utf8");
+    await fs.writeFile(path.join(cliDir, "ignored.txt"), "", "utf8");
+    await fs.writeFile(explicitPath, "", "utf8");
+
+    assert.deepEqual(
+      resolveCopilotOtelPaths({
+        HOME: tmp,
+        COPILOT_OTEL_FILE_EXPORTER_PATH: explicitPath,
+      }),
+      [
+        path.join(tmp, ".copilot", "otel", "cli.jsonl"),
+        path.join(tmp, ".copilot-otel", "copilot.jsonl"),
+        explicitPath,
+      ].sort(),
+    );
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
 function makeCopilotChatSpan({
   traceId = "trace-a",
   spanId = "span-1",
@@ -6114,6 +6768,255 @@ test("parseCopilotIncremental handles Chat extension LogRecord shape (hrTime + r
   }
 });
 
+test("parseCopilotIncremental does not merge Chat records that share spanContext", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-copilot-shared-context-"));
+  try {
+    const otelPath = path.join(tmp, "vscode-chat.jsonl");
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const first = makeCopilotChatLogRecord({
+      responseId: "shared-context-r1",
+      inputTokens: 500,
+      outputTokens: 50,
+      cacheRead: 0,
+    });
+    const second = makeCopilotChatLogRecord({
+      responseId: "shared-context-r2",
+      inputTokens: 800,
+      outputTokens: 90,
+      cacheRead: 0,
+    });
+    first.spanContext = { traceId: "shared-trace", spanId: "shared-span" };
+    second.spanContext = { traceId: "shared-trace", spanId: "shared-span" };
+    writeCopilotOtelFile(otelPath, [first, second]);
+
+    const result = await parseCopilotIncremental({
+      otelPaths: [otelPath],
+      cursors: {},
+      queuePath,
+    });
+    assert.equal(result.eventsAggregated, 2);
+
+    const buckets = (await readJsonLines(queuePath)).filter(
+      (entry) => entry.source === "copilot",
+    );
+    assert.equal(buckets.length, 1);
+    assert.equal(buckets[0].input_tokens, 1300);
+    assert.equal(buckets[0].output_tokens, 140);
+    assert.equal(buckets[0].conversation_count, 2);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseCopilotIncremental repairs v2 Chat deduplication before upgrading the cursor", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-copilot-v2-migration-"));
+  try {
+    const otelPath = path.join(tmp, "vscode-chat.jsonl");
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const first = makeCopilotChatLogRecord({
+      responseId: "v2-shared-r1",
+      inputTokens: 500,
+      outputTokens: 50,
+      cacheRead: 0,
+    });
+    const second = makeCopilotChatLogRecord({
+      responseId: "v2-shared-r2",
+      inputTokens: 800,
+      outputTokens: 90,
+      cacheRead: 0,
+    });
+    first.spanContext = { traceId: "v2-shared-trace", spanId: "v2-shared-span" };
+    second.spanContext = { traceId: "v2-shared-trace", spanId: "v2-shared-span" };
+    writeCopilotOtelFile(otelPath, [first, second]);
+    const stat = fssync.statSync(otelPath);
+    const model = "gpt-4o-mini-2024-07-18";
+    const hourStart = "2026-05-13T03:00:00.000Z";
+    const oldTotals = {
+      input_tokens: 500,
+      cached_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      output_tokens: 50,
+      reasoning_output_tokens: 0,
+      total_tokens: 550,
+      billable_total_tokens: 550,
+      conversation_count: 1,
+    };
+    const cursors = {
+      copilot: {
+        version: 2,
+        seenIds: ["v2-shared-trace:v2-shared-span"],
+        fileOffsets: {
+          [otelPath]: { size: stat.size, mtimeMs: stat.mtimeMs, ino: stat.ino },
+        },
+      },
+      hourly: {
+        version: 3,
+        buckets: {
+          [bucketKey("copilot", model, hourStart)]: {
+            totals: oldTotals,
+            queuedKey: null,
+          },
+        },
+        groupQueued: {},
+      },
+    };
+
+    const result = await parseCopilotIncremental({
+      otelPaths: [otelPath],
+      cursors,
+      queuePath,
+    });
+    assert.equal(result.eventsAggregated, 0, "the historical prefix is repaired during migration");
+    assert.equal(cursors.copilot.version, 3);
+
+    const [bucket] = (await readJsonLines(queuePath)).filter(
+      (entry) => entry.source === "copilot",
+    );
+    assert.equal(bucket.input_tokens, 1300);
+    assert.equal(bucket.output_tokens, 140);
+    assert.equal(bucket.total_tokens, 1440);
+    assert.equal(bucket.conversation_count, 2);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseCopilotIncremental migrates v2 when a recovered request creates a new bucket", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-copilot-v2-new-bucket-"));
+  try {
+    const otelPath = path.join(tmp, "vscode-chat.jsonl");
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const first = makeCopilotChatLogRecord({
+      responseId: "v2-new-bucket-r1",
+      model: "gpt-4o-mini-2024-07-18",
+      inputTokens: 500,
+      outputTokens: 50,
+      cacheRead: 0,
+    });
+    const recovered = makeCopilotChatLogRecord({
+      responseId: "v2-new-bucket-r2",
+      model: "gpt-5.6-luna",
+      inputTokens: 800,
+      outputTokens: 90,
+      cacheRead: 0,
+    });
+    // v2 collapsed these two Chat LogRecords into the first request because
+    // they share a spanContext. v3 must recover the second model's bucket.
+    first.spanContext = { traceId: "v2-new-bucket-trace", spanId: "v2-new-bucket-span" };
+    recovered.spanContext = { traceId: "v2-new-bucket-trace", spanId: "v2-new-bucket-span" };
+    writeCopilotOtelFile(otelPath, [first, recovered]);
+    const stat = fssync.statSync(otelPath);
+    const firstModel = "gpt-4o-mini-2024-07-18";
+    const recoveredModel = "gpt-5.6-luna";
+    const hourStart = "2026-05-13T03:00:00.000Z";
+    const cursors = {
+      copilot: {
+        version: 2,
+        seenIds: ["v2-new-bucket-trace:v2-new-bucket-span"],
+        fileOffsets: {
+          [otelPath]: { size: stat.size, mtimeMs: stat.mtimeMs, ino: stat.ino },
+        },
+      },
+      hourly: {
+        version: 3,
+        buckets: {
+          [bucketKey("copilot", firstModel, hourStart)]: {
+            totals: {
+              input_tokens: 500,
+              cached_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+              output_tokens: 50,
+              reasoning_output_tokens: 0,
+              total_tokens: 550,
+              billable_total_tokens: 550,
+              conversation_count: 1,
+            },
+            queuedKey: null,
+          },
+        },
+        groupQueued: {},
+      },
+    };
+
+    const result = await parseCopilotIncremental({
+      otelPaths: [otelPath],
+      cursors,
+      queuePath,
+    });
+    assert.equal(result.eventsAggregated, 0, "migration should process the historical prefix");
+    assert.equal(cursors.copilot.version, 3, "migration should advance the cursor");
+
+    const recoveredBucket = cursors.hourly.buckets[
+      bucketKey("copilot", recoveredModel, hourStart)
+    ];
+    assert.equal(recoveredBucket.totals.input_tokens, 800);
+    assert.equal(recoveredBucket.totals.output_tokens, 90);
+    assert.equal(recoveredBucket.totals.total_tokens, 890);
+    assert.equal(recoveredBucket.totals.conversation_count, 1);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseCopilotIncremental prunes deleted v2 files before processing new files", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-copilot-v2-deleted-file-"));
+  try {
+    const oldPath = path.join(tmp, "copilot-otel-old.jsonl");
+    const newPath = path.join(tmp, "copilot-otel-new.jsonl");
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const oldRecord = makeCopilotChatLogRecord({
+      responseId: "v2-deleted-old",
+      inputTokens: 400,
+      outputTokens: 40,
+      cacheRead: 0,
+    });
+    oldRecord.spanContext = { traceId: "v2-deleted-trace", spanId: "v2-deleted-span" };
+    writeCopilotOtelFile(oldPath, [oldRecord]);
+    const oldStat = fssync.statSync(oldPath);
+
+    writeCopilotOtelFile(newPath, [
+      makeCopilotChatLogRecord({
+        responseId: "v2-new-file",
+        model: "gpt-5.6-luna",
+        inputTokens: 700,
+        outputTokens: 80,
+        cacheRead: 0,
+      }),
+    ]);
+    await fs.rm(oldPath);
+
+    const cursors = {
+      copilot: {
+        version: 2,
+        seenIds: ["v2-deleted-trace:v2-deleted-span"],
+        fileOffsets: {
+          [oldPath]: { size: oldStat.size, mtimeMs: oldStat.mtimeMs, ino: oldStat.ino },
+        },
+      },
+    };
+    const result = await parseCopilotIncremental({
+      otelPaths: [newPath],
+      cursors,
+      queuePath,
+    });
+
+    assert.equal(result.eventsAggregated, 1, "the newly discovered file should be processed");
+    assert.equal(cursors.copilot.version, 3, "migration should advance past the deleted file");
+    assert.equal(cursors.copilot.fileOffsets[oldPath], undefined);
+    assert.equal(cursors.copilot.fileOffsets[newPath].size, fssync.statSync(newPath).size);
+
+    const [bucket] = (await readJsonLines(queuePath)).filter(
+      (entry) => entry.source === "copilot",
+    );
+    assert.equal(bucket.model, "gpt-5.6-luna");
+    assert.equal(bucket.input_tokens, 700);
+    assert.equal(bucket.output_tokens, 80);
+    assert.equal(bucket.total_tokens, 780);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test("parseCopilotIncremental reads short cache_creation + reasoning_tokens keys (Chat extension)", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-copilot-"));
   try {
@@ -6213,7 +7116,7 @@ test("parseCopilotIncremental migration: v1 cursor with empty seenIds + non-empt
 
     const result = await parseCopilotIncremental({ otelPaths: [otelPath], cursors, queuePath });
     assert.equal(result.eventsAggregated, 2, "migration should re-read both records");
-    assert.equal(cursors.copilot.version, 2, "version should be bumped");
+    assert.equal(cursors.copilot.version, 3, "version should be bumped");
 
     const queued = await readJsonLines(queuePath);
     const b = queued.find((r) => r.source === "copilot");
@@ -6255,7 +7158,7 @@ test("parseCopilotIncremental migration: preserves CLI fileOffsets (no re-read o
       0,
       "CLI file should be skipped entirely (offset === size after migration)",
     );
-    assert.equal(cursors.copilot.version, 2);
+    assert.equal(cursors.copilot.version, 3);
     // Offset preserved (within tolerance for fresh stat) — confirms no full re-read happened
     assert.equal(
       cursors.copilot.fileOffsets[otelPath].size,
@@ -10493,7 +11396,7 @@ test("parseGrokBuildIncremental reads Grok updates metadata by event timestamp",
     assert.equal(queued[1].input_tokens, 120);
     assert.equal(queued[1].output_tokens, 30);
     assert.equal(queued[1].conversation_count, 2);
-    assert.equal(cursors.grok.version, 4);
+    assert.equal(cursors.grok.version, 5);
     assert.equal(cursors.grok.sessionSnapshots["grok-session-updates"].totalTokens, 250);
     assert.equal(cursors.grok.sessionSnapshots["grok-session-updates"].source, "updates");
     assert.equal(cursors.grok.sessionSnapshots["grok-session-updates"].lastEventId, "evt-2");
@@ -10769,7 +11672,7 @@ test("parseGrokBuildIncremental preserves zero current context after compaction"
   }
 });
 
-test("parseGrokBuildIncremental upgrades pre-v4 Grok cursor by rebuilding from updates", async () => {
+test("parseGrokBuildIncremental upgrades legacy Grok cursor by rebuilding from updates", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-grok-v2-cursor-"));
   try {
     const queuePath = path.join(tmp, "queue.jsonl");
@@ -10778,7 +11681,7 @@ test("parseGrokBuildIncremental upgrades pre-v4 Grok cursor by rebuilding from u
       files: {},
       updatedAt: null,
       grok: {
-        // Pre-v4 cursors used context-window watermarks. Migrating to v4 must
+        // Legacy cursors used context-window watermarks. Migrating must
         // rebuild from disk (turn_completed when present; otherwise context
         // fallback) rather than keep the old undercount forever.
         version: 2,
@@ -10827,7 +11730,7 @@ test("parseGrokBuildIncremental upgrades pre-v4 Grok cursor by rebuilding from u
       queuePath,
     });
     assert.ok(firstRun.eventsAggregated >= 1);
-    assert.equal(cursors.grok.version, 4);
+    assert.equal(cursors.grok.version, 5);
     assert.equal(cursors.grok.sessionSnapshots["grok-session-v2"].totalTokens, 250);
 
     // Second sync must not double-count the rebuilt totals.
@@ -11132,6 +12035,7 @@ test("parseAntigravityIncremental bills only newly added context per planner cal
       queued[0].total_tokens,
       queued[0].input_tokens + queued[0].output_tokens + queued[0].reasoning_output_tokens,
     );
+    assert.equal(queued[0].billable_total_tokens, queued[0].total_tokens);
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
@@ -11614,6 +12518,710 @@ for (const eventType of ["USER_INPUT", "USER_SETTINGS_CHANGE"]) {
     }
   });
 }
+
+function encodeAntigravityTestVarint(val) {
+  const bytes = [];
+  let n = val;
+  while (n >= 0x80) {
+    bytes.push((n & 0x7f) | 0x80);
+    n = Math.floor(n / 128);
+  }
+  bytes.push(n & 0x7f);
+  return Buffer.from(bytes);
+}
+function encodeAntigravityTestTag(f, wire) {
+  return encodeAntigravityTestVarint((f << 3) | wire);
+}
+function encodeAntigravityTestLd(f, buf) {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  return Buffer.concat([encodeAntigravityTestTag(f, 2), encodeAntigravityTestVarint(b.length), b]);
+}
+function encodeAntigravityTestVi(f, val) {
+  return Buffer.concat([encodeAntigravityTestTag(f, 0), encodeAntigravityTestVarint(val)]);
+}
+
+function buildAntigravityTestProto({ model, contextTokens, lastStepIndex }) {
+  const parts = [];
+  if (model) parts.push(encodeAntigravityTestLd(19, model));
+  if (Number.isFinite(contextTokens)) {
+    const f1 = encodeAntigravityTestVi(1, contextTokens);
+    const f10 = encodeAntigravityTestLd(10, f1);
+    const f9 = encodeAntigravityTestLd(9, f10);
+    parts.push(f9);
+  }
+  if (lastStepIndex != null) {
+    const k = encodeAntigravityTestLd(1, "last_step_index");
+    const v = encodeAntigravityTestLd(2, String(lastStepIndex));
+    parts.push(encodeAntigravityTestLd(20, Buffer.concat([k, v])));
+  }
+  return encodeAntigravityTestLd(1, Buffer.concat(parts));
+}
+
+async function setupAntigravitySqliteSession(tmp, { convId = "conv-123", protos, lines } = {}) {
+  const brainDir = path.join(
+    tmp,
+    "antigravity",
+    "brain",
+    convId,
+    ".system_generated",
+    "logs",
+  );
+  const convDir = path.join(tmp, "antigravity", "conversations");
+  await fs.mkdir(brainDir, { recursive: true });
+  await fs.mkdir(convDir, { recursive: true });
+  const transcriptPath = path.join(brainDir, "transcript.jsonl");
+  const dbPath = path.join(convDir, `${convId}.db`);
+  sqliteCli.execFileSync("sqlite3", [
+    dbPath,
+    "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);",
+  ]);
+  if (Array.isArray(protos) && protos.length > 0) {
+    const values = protos
+      .map((proto, idx) => `(${idx}, X'${proto.toString("hex")}')`)
+      .join(", ");
+    sqliteCli.execFileSync("sqlite3", [
+      dbPath,
+      `INSERT INTO gen_metadata (idx, data) VALUES ${values};`,
+    ]);
+  }
+  if (Array.isArray(lines)) {
+    await fs.writeFile(transcriptPath, lines.map((line) => JSON.stringify(line)).join("\n"));
+  }
+  return {
+    transcriptPath,
+    dbPath,
+    queuePath: path.join(tmp, "queue.jsonl"),
+  };
+}
+
+function antigravityPlannerLines(turns) {
+  const lines = [];
+  for (const turn of turns) {
+    lines.push({
+      type: "USER_INPUT",
+      step_index: turn.userStep,
+      created_at: turn.userAt,
+      content: turn.userContent,
+    });
+    lines.push({
+      type: "PLANNER_RESPONSE",
+      step_index: turn.plannerStep,
+      created_at: turn.plannerAt,
+      content: turn.plannerContent,
+      thinking: turn.thinking,
+    });
+  }
+  return lines;
+}
+
+test("resolveAntigravityDbPath maps brain transcript logs to conversations database", () => {
+  const transcriptPath =
+    "/Users/test/.gemini/antigravity/brain/session-abc-123/.system_generated/logs/transcript.jsonl";
+  const expectedDb = path.join(
+    "/Users/test/.gemini/antigravity",
+    "conversations",
+    "session-abc-123.db",
+  );
+  assert.equal(resolveAntigravityDbPath(transcriptPath), expectedDb);
+  assert.equal(resolveAntigravityDbPath("/var/tmp/other.jsonl"), null);
+});
+
+test("extractAntigravityGenInfo extracts model, context tokens, and step index from protobuf payload", () => {
+  const proto = buildAntigravityTestProto({
+    model: "gemini-3.8-flash",
+    contextTokens: 25000,
+    lastStepIndex: 0,
+  });
+  const info = extractAntigravityGenInfo(proto);
+  assert.deepEqual(info, {
+    model: "gemini-3.8-flash",
+    contextTokens: 25000,
+    lastStepIndex: 0,
+  });
+});
+
+test("parseAntigravityIncremental uses SQLite context size without inferring cache hits", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-antigravity-sqlite-"));
+  try {
+    const { transcriptPath, queuePath } = await setupAntigravitySqliteSession(tmp, {
+      protos: [
+        buildAntigravityTestProto({
+          model: "gemini-3.8-flash",
+          contextTokens: 25000,
+          lastStepIndex: 0,
+        }),
+        buildAntigravityTestProto({
+          model: "gemini-3.8-flash",
+          contextTokens: 30000,
+          lastStepIndex: 2,
+        }),
+      ],
+      lines: antigravityPlannerLines([
+        {
+          userStep: 0,
+          userAt: "2026-04-05T14:00:00.000Z",
+          userContent: "hello",
+          plannerStep: 1,
+          plannerAt: "2026-04-05T14:01:00.000Z",
+          plannerContent: "hi",
+          thinking: "think1",
+        },
+        {
+          userStep: 2,
+          userAt: "2026-04-05T14:02:00.000Z",
+          userContent: "next prompt",
+          plannerStep: 3,
+          plannerAt: "2026-04-05T14:03:00.000Z",
+          plannerContent: "done",
+          thinking: "think2",
+        },
+      ]),
+    });
+    const cursors = { version: 1, files: {}, updatedAt: null };
+
+    const result = await parseAntigravityIncremental({
+      sessionFiles: [transcriptPath],
+      cursors,
+      queuePath,
+    });
+    assert.equal(result.eventsAggregated, 2);
+
+    const queued = await readJsonLines(queuePath);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].source, "antigravity");
+    assert.equal(queued[0].model, "gemini-3.8-flash");
+    assert.equal(queued[0].input_tokens, 30000);
+    assert.equal(queued[0].cached_input_tokens, 0);
+    assert.equal(queued[0].conversation_count, 2);
+    assert.equal(
+      queued[0].total_tokens,
+      queued[0].input_tokens + queued[0].output_tokens + queued[0].reasoning_output_tokens,
+    );
+    assert.equal(cursors.files[transcriptPath].usageSource, "sqlite");
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseAntigravityIncremental does not invent cache hits on a repeated context", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-antigravity-cold-cache-"));
+  try {
+    const { transcriptPath, queuePath } = await setupAntigravitySqliteSession(tmp, {
+      protos: [
+        buildAntigravityTestProto({
+          model: "gemini-3.8-flash",
+          contextTokens: 25000,
+          lastStepIndex: 0,
+        }),
+        buildAntigravityTestProto({
+          model: "gemini-3.8-flash",
+          contextTokens: 25000,
+          lastStepIndex: 2,
+        }),
+      ],
+      lines: antigravityPlannerLines([
+        {
+          userStep: 0,
+          userAt: "2026-04-05T14:00:00.000Z",
+          userContent: "hello",
+          plannerStep: 1,
+          plannerAt: "2026-04-05T14:01:00.000Z",
+          plannerContent: "hi",
+          thinking: "think1",
+        },
+        {
+          userStep: 2,
+          userAt: "2026-04-05T14:02:00.000Z",
+          userContent: "again",
+          plannerStep: 3,
+          plannerAt: "2026-04-05T14:03:00.000Z",
+          plannerContent: "still hi",
+          thinking: "think2",
+        },
+      ]),
+    });
+
+    await parseAntigravityIncremental({
+      sessionFiles: [transcriptPath],
+      cursors: { version: 1, files: {}, updatedAt: null },
+      queuePath,
+    });
+    const queued = await readJsonLines(queuePath);
+    assert.equal(queued[0].input_tokens, 25000);
+    assert.equal(queued[0].cached_input_tokens, 0);
+    assert.equal(queued[0].conversation_count, 2);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseAntigravityIncremental bills full context after a model switch", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-antigravity-model-switch-"));
+  try {
+    const { transcriptPath, queuePath } = await setupAntigravitySqliteSession(tmp, {
+      protos: [
+        buildAntigravityTestProto({
+          model: "gemini-3.8-flash",
+          contextTokens: 25000,
+          lastStepIndex: 0,
+        }),
+        buildAntigravityTestProto({
+          model: "claude-sonnet-4-6",
+          contextTokens: 40000,
+          lastStepIndex: 2,
+        }),
+      ],
+      lines: antigravityPlannerLines([
+        {
+          userStep: 0,
+          userAt: "2026-04-05T14:00:00.000Z",
+          userContent: "hello",
+          plannerStep: 1,
+          plannerAt: "2026-04-05T14:01:00.000Z",
+          plannerContent: "hi",
+          thinking: "think1",
+        },
+        {
+          userStep: 2,
+          userAt: "2026-04-05T14:02:00.000Z",
+          userContent: "switch",
+          plannerStep: 3,
+          plannerAt: "2026-04-05T14:03:00.000Z",
+          plannerContent: "ok",
+          thinking: "think2",
+        },
+      ]),
+    });
+
+    await parseAntigravityIncremental({
+      sessionFiles: [transcriptPath],
+      cursors: { version: 1, files: {}, updatedAt: null },
+      queuePath,
+    });
+    const queued = await readJsonLines(queuePath);
+    const byModel = Object.fromEntries(queued.map((row) => [row.model, row]));
+    assert.equal(byModel["gemini-3.8-flash"].input_tokens, 25000);
+    assert.equal(byModel["gemini-3.8-flash"].cached_input_tokens, 0);
+    assert.equal(byModel["claude-sonnet-4-6"].input_tokens, 40000);
+    assert.equal(byModel["claude-sonnet-4-6"].cached_input_tokens, 0);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseAntigravityIncremental SQLite full scan matches incremental append", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-antigravity-full-vs-inc-"));
+  try {
+    const firstLines = antigravityPlannerLines([
+      {
+        userStep: 0,
+        userAt: "2026-04-05T14:00:00.000Z",
+        userContent: "hello",
+        plannerStep: 1,
+        plannerAt: "2026-04-05T14:01:00.000Z",
+        plannerContent: "hi",
+        thinking: "think1",
+      },
+    ]);
+    const allLines = antigravityPlannerLines([
+      {
+        userStep: 0,
+        userAt: "2026-04-05T14:00:00.000Z",
+        userContent: "hello",
+        plannerStep: 1,
+        plannerAt: "2026-04-05T14:01:00.000Z",
+        plannerContent: "hi",
+        thinking: "think1",
+      },
+      {
+        userStep: 2,
+        userAt: "2026-04-05T14:02:00.000Z",
+        userContent: "next prompt",
+        plannerStep: 3,
+        plannerAt: "2026-04-05T14:03:00.000Z",
+        plannerContent: "done",
+        thinking: "think2",
+      },
+    ]);
+    const protos = [
+      buildAntigravityTestProto({
+        model: "gemini-3.8-flash",
+        contextTokens: 25000,
+        lastStepIndex: 0,
+      }),
+      buildAntigravityTestProto({
+        model: "gemini-3.8-flash",
+        contextTokens: 30000,
+        lastStepIndex: 2,
+      }),
+    ];
+
+    const fullDir = path.join(tmp, "full");
+    const incDir = path.join(tmp, "inc");
+    await fs.mkdir(fullDir, { recursive: true });
+    await fs.mkdir(incDir, { recursive: true });
+
+    const full = await setupAntigravitySqliteSession(fullDir, { protos, lines: allLines });
+    await parseAntigravityIncremental({
+      sessionFiles: [full.transcriptPath],
+      cursors: { version: 1, files: {}, updatedAt: null },
+      queuePath: full.queuePath,
+    });
+    const fullQueued = await readJsonLines(full.queuePath);
+
+    const inc = await setupAntigravitySqliteSession(incDir, { protos, lines: firstLines });
+    const incCursors = { version: 1, files: {}, updatedAt: null };
+    await parseAntigravityIncremental({
+      sessionFiles: [inc.transcriptPath],
+      cursors: incCursors,
+      queuePath: inc.queuePath,
+    });
+    await fs.writeFile(inc.transcriptPath, allLines.map((line) => JSON.stringify(line)).join("\n"));
+    await parseAntigravityIncremental({
+      sessionFiles: [inc.transcriptPath],
+      cursors: incCursors,
+      queuePath: inc.queuePath,
+    });
+    const incQueued = await readJsonLines(inc.queuePath);
+    const incLatest = incQueued.at(-1);
+    const fullLatest = fullQueued.at(-1);
+
+    assert.equal(incLatest.input_tokens, fullLatest.input_tokens);
+    assert.equal(incLatest.cached_input_tokens, 0);
+    assert.equal(fullLatest.cached_input_tokens, 0);
+    assert.equal(incLatest.output_tokens, fullLatest.output_tokens);
+    assert.equal(incLatest.conversation_count, fullLatest.conversation_count);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseAntigravityIncremental reconciles a legacy estimated cursor with SQLite context", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-antigravity-legacy-cursor-"));
+  try {
+    const firstLines = antigravityPlannerLines([
+      {
+        userStep: 0,
+        userAt: "2026-04-05T14:00:00.000Z",
+        userContent: "hello",
+        plannerStep: 1,
+        plannerAt: "2026-04-05T14:01:00.000Z",
+        plannerContent: "hi",
+        thinking: "think1",
+      },
+    ]);
+    const allLines = antigravityPlannerLines([
+      {
+        userStep: 0,
+        userAt: "2026-04-05T14:00:00.000Z",
+        userContent: "hello",
+        plannerStep: 1,
+        plannerAt: "2026-04-05T14:01:00.000Z",
+        plannerContent: "hi",
+        thinking: "think1",
+      },
+      {
+        userStep: 2,
+        userAt: "2026-04-05T14:02:00.000Z",
+        userContent: "next prompt",
+        plannerStep: 3,
+        plannerAt: "2026-04-05T14:03:00.000Z",
+        plannerContent: "done",
+        thinking: "think2",
+      },
+    ]);
+    const { transcriptPath, dbPath, queuePath } = await setupAntigravitySqliteSession(tmp, {
+      protos: [],
+      lines: firstLines,
+    });
+    const cursors = { version: 1, files: {}, updatedAt: null };
+    await parseAntigravityIncremental({
+      sessionFiles: [transcriptPath],
+      cursors,
+      queuePath,
+    });
+    const afterEstimate = await readJsonLines(queuePath);
+    const estimatedInput = afterEstimate[0].input_tokens;
+    assert.ok(estimatedInput > 0);
+    assert.ok(estimatedInput < 1000);
+    assert.equal(afterEstimate[0].cached_input_tokens, 0);
+    assert.equal(cursors.files[transcriptPath].usageSource, "estimated");
+
+    const turn1Proto = buildAntigravityTestProto({
+      model: "gemini-3.8-flash",
+      contextTokens: 25000,
+      lastStepIndex: 0,
+    });
+    const turn2Proto = buildAntigravityTestProto({
+      model: "gemini-3.8-flash",
+      contextTokens: 30000,
+      lastStepIndex: 2,
+    });
+    sqliteCli.execFileSync("sqlite3", [
+      dbPath,
+      `INSERT INTO gen_metadata (idx, data) VALUES (0, X'${turn1Proto.toString("hex")}'), (1, X'${turn2Proto.toString("hex")}');`,
+    ]);
+    await fs.writeFile(transcriptPath, allLines.map((line) => JSON.stringify(line)).join("\n"));
+    const second = await parseAntigravityIncremental({
+      sessionFiles: [transcriptPath],
+      cursors,
+      queuePath,
+    });
+    assert.equal(second.eventsAggregated, 1);
+
+    const queued = await readJsonLines(queuePath);
+    const estimatedRow = queued.find((row) => row.model === afterEstimate[0].model);
+    const sqliteRow = queued.filter((row) => row.model === "gemini-3.8-flash").at(-1);
+    assert.equal(estimatedRow.input_tokens, estimatedInput);
+    assert.equal(estimatedRow.cached_input_tokens, 0);
+    assert.equal(sqliteRow.input_tokens, 5000);
+    assert.equal(sqliteRow.cached_input_tokens, 0);
+    assert.equal(sqliteRow.conversation_count, 1);
+    assert.equal(cursors.files[transcriptPath].usageSource, "sqlite");
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseAntigravityIncremental resumes a sqlite cursor without re-walking estimated history", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-antigravity-sqlite-resume-"));
+  try {
+    const firstLines = antigravityPlannerLines([
+      {
+        userStep: 0,
+        userAt: "2026-04-05T14:00:00.000Z",
+        userContent: "hello",
+        plannerStep: 1,
+        plannerAt: "2026-04-05T14:01:00.000Z",
+        plannerContent: "hi",
+        thinking: "think1",
+      },
+    ]);
+    const allLines = antigravityPlannerLines([
+      {
+        userStep: 0,
+        userAt: "2026-04-05T14:00:00.000Z",
+        userContent: "hello",
+        plannerStep: 1,
+        plannerAt: "2026-04-05T14:01:00.000Z",
+        plannerContent: "hi",
+        thinking: "think1",
+      },
+      {
+        userStep: 2,
+        userAt: "2026-04-05T14:02:00.000Z",
+        userContent: "next prompt",
+        plannerStep: 3,
+        plannerAt: "2026-04-05T14:03:00.000Z",
+        plannerContent: "done",
+        thinking: "think2",
+      },
+    ]);
+    const { transcriptPath, dbPath, queuePath } = await setupAntigravitySqliteSession(tmp, {
+      protos: [
+        buildAntigravityTestProto({
+          model: "gemini-3.8-flash",
+          contextTokens: 25000,
+          lastStepIndex: 0,
+        }),
+      ],
+      lines: firstLines,
+    });
+    const cursors = { version: 1, files: {}, updatedAt: null };
+    await parseAntigravityIncremental({
+      sessionFiles: [transcriptPath],
+      cursors,
+      queuePath,
+    });
+    assert.equal(cursors.files[transcriptPath].usageSource, "sqlite");
+    assert.equal(cursors.files[transcriptPath].previousContextTokens, 25000);
+
+    sqliteCli.execFileSync("sqlite3", [dbPath, "DELETE FROM gen_metadata;"]);
+    const turn2Proto = buildAntigravityTestProto({
+      model: "gemini-3.8-flash",
+      contextTokens: 30000,
+      lastStepIndex: 2,
+    });
+    sqliteCli.execFileSync("sqlite3", [
+      dbPath,
+      `INSERT INTO gen_metadata (idx, data) VALUES (0, X'${turn2Proto.toString("hex")}');`,
+    ]);
+    await fs.writeFile(transcriptPath, allLines.map((line) => JSON.stringify(line)).join("\n"));
+    const second = await parseAntigravityIncremental({
+      sessionFiles: [transcriptPath],
+      cursors,
+      queuePath,
+    });
+    assert.equal(second.eventsAggregated, 1);
+
+    const queued = await readJsonLines(queuePath);
+    const latest = queued.filter((row) => row.model === "gemini-3.8-flash").at(-1);
+    assert.equal(latest.input_tokens, 30000);
+    assert.equal(latest.cached_input_tokens, 0);
+    assert.equal(cursors.files[transcriptPath].usageSource, "sqlite");
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseAntigravityIncremental sparse sqlite full scan matches incremental append", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-antigravity-sparse-full-inc-"));
+  try {
+    const planner1 = "hi";
+    const user2 = "next prompt";
+    const firstLines = antigravityPlannerLines([
+      {
+        userStep: 0,
+        userAt: "2026-04-05T14:00:00.000Z",
+        userContent: "hello",
+        plannerStep: 1,
+        plannerAt: "2026-04-05T14:01:00.000Z",
+        plannerContent: planner1,
+        thinking: "think1",
+      },
+    ]);
+    const allLines = antigravityPlannerLines([
+      {
+        userStep: 0,
+        userAt: "2026-04-05T14:00:00.000Z",
+        userContent: "hello",
+        plannerStep: 1,
+        plannerAt: "2026-04-05T14:01:00.000Z",
+        plannerContent: planner1,
+        thinking: "think1",
+      },
+      {
+        userStep: 2,
+        userAt: "2026-04-05T14:02:00.000Z",
+        userContent: user2,
+        plannerStep: 3,
+        plannerAt: "2026-04-05T14:03:00.000Z",
+        plannerContent: "done",
+        thinking: "think2",
+      },
+    ]);
+    const protos = [
+      buildAntigravityTestProto({
+        model: "gemini-3.8-flash",
+        contextTokens: 25000,
+        lastStepIndex: 0,
+      }),
+    ];
+
+    const fullDir = path.join(tmp, "full");
+    const incDir = path.join(tmp, "inc");
+    await fs.mkdir(fullDir, { recursive: true });
+    await fs.mkdir(incDir, { recursive: true });
+
+    const full = await setupAntigravitySqliteSession(fullDir, { protos, lines: allLines });
+    await parseAntigravityIncremental({
+      sessionFiles: [full.transcriptPath],
+      cursors: { version: 1, files: {}, updatedAt: null },
+      queuePath: full.queuePath,
+    });
+    const fullQueued = await readJsonLines(full.queuePath);
+
+    const inc = await setupAntigravitySqliteSession(incDir, { protos, lines: firstLines });
+    const incCursors = { version: 1, files: {}, updatedAt: null };
+    await parseAntigravityIncremental({
+      sessionFiles: [inc.transcriptPath],
+      cursors: incCursors,
+      queuePath: inc.queuePath,
+    });
+    await fs.writeFile(inc.transcriptPath, allLines.map((line) => JSON.stringify(line)).join("\n"));
+    await parseAntigravityIncremental({
+      sessionFiles: [inc.transcriptPath],
+      cursors: incCursors,
+      queuePath: inc.queuePath,
+    });
+    const incLatest = (await readJsonLines(inc.queuePath)).at(-1);
+    const fullLatest = fullQueued.at(-1);
+    const expectedSecondInput = antigravityTestTokens(planner1) + antigravityTestTokens(user2);
+
+    assert.equal(fullLatest.input_tokens, 25000 + expectedSecondInput);
+    assert.equal(incLatest.input_tokens, fullLatest.input_tokens);
+    assert.equal(incLatest.cached_input_tokens, 0);
+    assert.equal(fullLatest.cached_input_tokens, 0);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("parseAntigravityIncremental re-walk with sparse sqlite keeps prior planner output", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-antigravity-sparse-rewalk-"));
+  try {
+    const planner1 = "hi";
+    const user2 = "next prompt";
+    const firstLines = antigravityPlannerLines([
+      {
+        userStep: 0,
+        userAt: "2026-04-05T14:00:00.000Z",
+        userContent: "hello",
+        plannerStep: 1,
+        plannerAt: "2026-04-05T14:01:00.000Z",
+        plannerContent: planner1,
+        thinking: "think1",
+      },
+    ]);
+    const allLines = antigravityPlannerLines([
+      {
+        userStep: 0,
+        userAt: "2026-04-05T14:00:00.000Z",
+        userContent: "hello",
+        plannerStep: 1,
+        plannerAt: "2026-04-05T14:01:00.000Z",
+        plannerContent: planner1,
+        thinking: "think1",
+      },
+      {
+        userStep: 2,
+        userAt: "2026-04-05T14:02:00.000Z",
+        userContent: user2,
+        plannerStep: 3,
+        plannerAt: "2026-04-05T14:03:00.000Z",
+        plannerContent: "done",
+        thinking: "think2",
+      },
+    ]);
+    const { transcriptPath, dbPath, queuePath } = await setupAntigravitySqliteSession(tmp, {
+      protos: [],
+      lines: firstLines,
+    });
+    const cursors = { version: 1, files: {}, updatedAt: null };
+    await parseAntigravityIncremental({
+      sessionFiles: [transcriptPath],
+      cursors,
+      queuePath,
+    });
+
+    sqliteCli.execFileSync("sqlite3", [
+      dbPath,
+      `INSERT INTO gen_metadata (idx, data) VALUES (0, X'${buildAntigravityTestProto({
+        model: "gemini-3.8-flash",
+        contextTokens: 25000,
+        lastStepIndex: 0,
+      }).toString("hex")}');`,
+    ]);
+    await fs.writeFile(transcriptPath, allLines.map((line) => JSON.stringify(line)).join("\n"));
+    const second = await parseAntigravityIncremental({
+      sessionFiles: [transcriptPath],
+      cursors,
+      queuePath,
+    });
+    assert.equal(second.eventsAggregated, 1);
+
+    const sqliteRow = (await readJsonLines(queuePath))
+      .filter((row) => row.model === "gemini-3.8-flash")
+      .at(-1);
+    assert.equal(
+      sqliteRow.input_tokens,
+      antigravityTestTokens(planner1) + antigravityTestTokens(user2),
+    );
+    assert.equal(sqliteRow.cached_input_tokens, 0);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
 
 // ── Kimi Code official (@moonshot-ai/kimi-code) ──────────────────────────────
 

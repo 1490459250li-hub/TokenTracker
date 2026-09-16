@@ -10,6 +10,9 @@ struct BotSpriteView: View {
     let state: String
     /// Stored colour preference: a palette id, or "auto" to follow the appearance.
     let colorId: String
+    /// Whether the view is currently visible. When false the TimelineView is paused
+    /// to avoid 30fps background rendering (popover/floating panel hidden).
+    var isVisible: Bool = true
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -41,7 +44,7 @@ struct BotSpriteView: View {
     private var engineState: String { BotFrames.engineState(forPetState: state) }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / Self.displayFps, paused: reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / Self.displayFps, paused: !isVisible || reduceMotion)) { context in
             Canvas(rendersAsynchronously: false) { ctx, canvasSize in
                 draw(in: &ctx, side: min(canvasSize.width, canvasSize.height), now: context.date)
             }

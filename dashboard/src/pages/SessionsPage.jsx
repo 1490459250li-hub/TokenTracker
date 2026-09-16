@@ -65,6 +65,25 @@ function overlapsRange(session, startMs) {
   return Number.isFinite(ended) ? ended >= startMs : true;
 }
 
+function modelUsageRows(session) {
+  const observed = Array.isArray(session?.model_usage)
+    ? session.model_usage.filter((row) => row && typeof row.model === "string" && row.model)
+    : [];
+  if (observed.length) return observed;
+  return [{
+    model: session?.model || copy("sessions.model.unknown"),
+    total_tokens: Number(session?.own_total_tokens || session?.total_tokens || 0),
+  }];
+}
+
+function modelUsageLabel(session) {
+  const rows = modelUsageRows(session);
+  if (rows.length === 1) return rows[0].model;
+  return rows
+    .map((row) => `${row.model} ${formatCompactNumber(Number(row.total_tokens || 0))}`)
+    .join(" · ");
+}
+
 function formatWhen(value, locale) {
   if (!value) return "—";
   const ms = Date.parse(value);
@@ -109,14 +128,49 @@ async function copyToClipboard(text) {
   return ok;
 }
 
-const SessionRow = React.memo(function SessionRow({ session, locale }) {
+const SessionRow = React.memo(function SessionRow({
+  session,
+  locale,
+  nested = false,
+  childCount = 0,
+  expanded = false,
+  onToggle,
+}) {
   const { currency, rate } = useCurrency();
   const provider = String(session.source || "").toUpperCase();
   const duration = formatDuration(session.duration_ms);
   const command = session.resume_command;
   const projectLabel = session.project_key || copy("sessions.project.unknown");
-  const title = session.title || projectLabel;
+  const isSubagent = nested || session.thread_kind === "subagent";
+  const title = isSubagent
+    ? (session.agent_nickname || session.agent_role || session.title || projectLabel)
+    : (session.title || projectLabel);
   const showProjectInMeta = Boolean(session.title && session.project_key);
+  const isGrok = String(session.source || "").toLowerCase() === "grok";
+  const grokTokenBreakdown = isGrok && session.usage_precision
+    ? copy("sessions.grok.token_breakdown", {
+        input: formatCompactNumber(session.input_tokens),
+        cacheRead: formatCompactNumber(session.cached_input_tokens),
+        cacheWrite: formatCompactNumber(session.cache_creation_input_tokens),
+        output: formatCompactNumber(session.output_tokens),
+        reasoning: formatCompactNumber(session.reasoning_output_tokens),
+      })
+    : null;
+  const grokRuntimeBreakdown = isGrok && session.usage_precision
+    ? copy("sessions.grok.runtime_breakdown", {
+        calls: formatCompactNumber(session.model_calls),
+        seconds: (Number(session.api_duration_ms || 0) / 1000).toFixed(1),
+        tools: formatCompactNumber(session.tool_calls),
+        errors: formatCompactNumber(session.error_count),
+      })
+    : null;
+  const grokContextBreakdown = isGrok && Number(session.context_window_tokens) > 0
+    ? copy("sessions.grok.context_breakdown", {
+        used: formatCompactNumber(session.context_tokens_used),
+        window: formatCompactNumber(session.context_window_tokens),
+        percent: Number(session.context_usage_percent || 0).toFixed(0),
+      })
+    : null;
 
   // The resume command only works from the session's own directory, so the full
   // local path has to stay reachable. Hover reveals it, click copies it — that
@@ -173,7 +227,10 @@ const SessionRow = React.memo(function SessionRow({ session, locale }) {
   };
 
   return (
-    <li className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start">
+    <li className={cn(
+      "flex flex-col gap-3 py-4 sm:flex-row sm:items-start",
+      nested && "ml-6 border-l-2 border-oai-gray-200 pl-4 dark:border-oai-gray-800",
+    )}>
       <div className="flex min-w-0 flex-1 items-start gap-2.5">
         <span className="mt-0.5 shrink-0 text-oai-gray-400 dark:text-oai-gray-500">
           <ProviderIcon provider={provider} size={20} />
@@ -182,17 +239,54 @@ const SessionRow = React.memo(function SessionRow({ session, locale }) {
           <div className="flex flex-wrap items-center gap-2">
             {/* With no agent-authored title the heading *is* the project name,
                 so the copy affordance moves there rather than duplicating it. */}
-            {!session.title && session.project_ref ? (
+            {!isSubagent && !session.title && session.project_ref ? (
               projectLabelNode("font-medium text-oai-black dark:text-white")
             ) : (
               <span className="truncate font-medium text-oai-black dark:text-white">
                 {title}
               </span>
             )}
+            {isSubagent ? (
+              <span className="inline-flex items-center rounded-full bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-500/10 dark:text-sky-300">
+                {copy("sessions.badge.subagent")}
+                {session.agent_role ? ` · ${session.agent_role}` : ""}
+              </span>
+            ) : null}
             {session.first_pass ? (
               <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
                 {copy("sessions.badge.first_pass")}
               </span>
+            ) : null}
+            {(isGrok && session.usage_precision) || session.cost_is_partial ? (
+              <span className={cn(
+                "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium",
+                session.usage_is_incomplete || session.cost_is_partial
+                  ? "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
+                  : "bg-sky-50 text-sky-700 dark:bg-sky-500/10 dark:text-sky-300",
+              )}>
+                {session.usage_is_incomplete
+                  ? copy("sessions.badge.partial_usage")
+                  : session.cost_is_partial
+                    // Distinct from partial usage: every token is observed,
+                    // but a model in the session has no public rate, so the
+                    // cost below is a lower bound rather than an estimate.
+                    ? copy("sessions.badge.partial_cost")
+                    : session.cost_source === "provider_reported"
+                      ? copy("sessions.badge.reported_cost")
+                      : copy("sessions.badge.reported_usage")}
+              </span>
+            ) : null}
+            {childCount ? (
+              <button
+                type="button"
+                onClick={onToggle}
+                aria-expanded={expanded}
+                className="inline-flex items-center rounded-full border border-oai-gray-200 px-2 py-0.5 text-[11px] font-medium text-oai-gray-600 transition-colors hover:bg-oai-gray-100 hover:text-oai-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-oai-brand-500 dark:border-oai-gray-700 dark:text-oai-gray-300 dark:hover:bg-oai-gray-800 dark:hover:text-white"
+              >
+                {expanded
+                  ? copy("sessions.thread.collapse", { count: childCount })
+                  : copy("sessions.thread.expand", { count: childCount })}
+              </button>
             ) : null}
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-oai-gray-500 dark:text-oai-gray-400">
@@ -206,7 +300,7 @@ const SessionRow = React.memo(function SessionRow({ session, locale }) {
                 <span aria-hidden>·</span>
               </>
             ) : null}
-            <span className="truncate">{session.model || copy("sessions.model.unknown")}</span>
+            <span className="truncate">{modelUsageLabel(session)}</span>
             <span aria-hidden>·</span>
             <span className="tabular-nums">{formatWhen(session.started_at, locale)}</span>
             {duration ? (
@@ -216,6 +310,22 @@ const SessionRow = React.memo(function SessionRow({ session, locale }) {
               </>
             ) : null}
           </div>
+          {grokTokenBreakdown ? (
+            <div className="mt-1 text-[11px] tabular-nums text-oai-gray-500 dark:text-oai-gray-400">
+              {grokTokenBreakdown}
+            </div>
+          ) : null}
+          {grokRuntimeBreakdown ? (
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] tabular-nums text-oai-gray-400 dark:text-oai-gray-500">
+              <span>{grokRuntimeBreakdown}</span>
+              {grokContextBreakdown ? (
+                <>
+                  <span aria-hidden>·</span>
+                  <span>{grokContextBreakdown}</span>
+                </>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -223,11 +333,32 @@ const SessionRow = React.memo(function SessionRow({ session, locale }) {
         <dl className="flex items-start gap-6 text-right">
           <div className="flex w-16 flex-col-reverse">
             <dt className="text-[11px] text-oai-gray-400 dark:text-oai-gray-500">{copy("sessions.col.tokens")}</dt>
-            <dd className="tabular-nums text-sm font-medium text-oai-black dark:text-white">{formatCompactNumber(session.total_tokens)}</dd>
+            <dd
+              title={Number(session.subagent_total_tokens)
+                ? copy("sessions.thread.tokens_summary", {
+                    own: formatCompactNumber(session.own_total_tokens),
+                    subagents: formatCompactNumber(session.subagent_total_tokens),
+                    combined: formatCompactNumber(session.combined_total_tokens),
+                  })
+                : undefined}
+              className="tabular-nums text-sm font-medium text-oai-black dark:text-white"
+            >
+              {formatCompactNumber(session.total_tokens)}
+              {Number(session.subagent_total_tokens) ? (
+                <span className="block text-[9px] font-normal text-oai-gray-400 dark:text-oai-gray-500">
+                  Σ {formatCompactNumber(session.combined_total_tokens)}
+                </span>
+              ) : null}
+            </dd>
           </div>
           <div className="flex w-16 flex-col-reverse">
             <dt className="text-[11px] text-oai-gray-400 dark:text-oai-gray-500">{copy("sessions.col.cost")}</dt>
-            <dd className="tabular-nums text-sm font-medium text-oai-black dark:text-white">{formatUsdCurrency(session.cost_usd, { currency, rate })}</dd>
+            <dd
+              className="tabular-nums text-sm font-medium text-oai-black dark:text-white"
+              title={session.cost_is_partial ? copy("sessions.cost.partial_title") : undefined}
+            >
+              {session.cost_is_partial ? "≥" : ""}{formatUsdCurrency(session.cost_usd, { currency, rate })}
+            </dd>
           </div>
           <div className="hidden w-10 flex-col-reverse sm:flex">
             <dt className="text-[11px] text-oai-gray-400 dark:text-oai-gray-500">{copy("sessions.col.turns")}</dt>
@@ -260,6 +391,73 @@ const SessionRow = React.memo(function SessionRow({ session, locale }) {
   );
 });
 
+function ThreadModelUsage({ sessions, selectedModel, onSelect }) {
+  const { groups, totalTokens } = useMemo(() => {
+    const byModel = new Map();
+    let total = 0;
+    for (const session of sessions) {
+      for (const usage of modelUsageRows(session)) {
+        const model = usage.model || copy("sessions.model.unknown");
+        const tokens = Number(usage.total_tokens || 0);
+        const current = byModel.get(model) || { model, count: 0, tokens: 0 };
+        current.count += 1;
+        current.tokens += tokens;
+        total += tokens;
+        byModel.set(model, current);
+      }
+    }
+    return {
+      groups: [...byModel.values()].sort((a, b) => b.tokens - a.tokens),
+      totalTokens: total,
+    };
+  }, [sessions]);
+
+  function buttonClass(active) {
+    return cn(
+      "rounded-full border px-2.5 py-1 text-xs tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-oai-brand-500",
+      active
+        ? "border-oai-brand-500 bg-oai-brand-50 text-oai-brand-700 dark:bg-oai-brand-500/10 dark:text-oai-brand-300"
+        : "border-oai-gray-200 text-oai-gray-600 hover:bg-oai-gray-100 dark:border-oai-gray-700 dark:text-oai-gray-300 dark:hover:bg-oai-gray-800",
+    );
+  }
+
+  return (
+    <li className="ml-6 border-l-2 border-oai-gray-200 py-3 pl-4 dark:border-oai-gray-800">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-xs font-medium text-oai-gray-500 dark:text-oai-gray-400">
+          {copy("sessions.thread.model_usage")}
+        </span>
+        <button
+          type="button"
+          aria-pressed={selectedModel === "all"}
+          onClick={() => onSelect("all")}
+          className={buttonClass(selectedModel === "all")}
+        >
+          {copy("sessions.thread.model_all", {
+            count: sessions.length,
+            tokens: formatCompactNumber(totalTokens),
+          })}
+        </button>
+        {groups.map((group) => (
+          <button
+            key={group.model}
+            type="button"
+            aria-pressed={selectedModel === group.model}
+            onClick={() => onSelect(group.model)}
+            className={buttonClass(selectedModel === group.model)}
+          >
+            {copy("sessions.thread.model_item", {
+              model: group.model,
+              count: group.count,
+              tokens: formatCompactNumber(group.tokens),
+            })}
+          </button>
+        ))}
+      </div>
+    </li>
+  );
+}
+
 export function SessionsPage() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -270,6 +468,8 @@ export function SessionsPage() {
   const [projectFilter, setProjectFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [expandedThreads, setExpandedThreads] = useState(() => new Set());
+  const [threadModelFilters, setThreadModelFilters] = useState(() => new Map());
   const requestIdRef = useRef(0);
   const { resolvedLocale } = useLocale();
 
@@ -330,10 +530,36 @@ export function SessionsPage() {
       if (projectFilter !== "all" && row.project_key !== projectFilter) return false;
       if (!overlapsRange(row, startMs)) return false;
       if (!q) return true;
-      const haystack = `${row.title || ""} ${row.project_key || ""} ${row.model || ""} ${row.project_ref || ""} ${row.session_id || ""}`.toLowerCase();
+      const models = modelUsageRows(row).map((usage) => usage.model).join(" ");
+      const haystack = `${row.title || ""} ${row.project_key || ""} ${models} ${row.agent_nickname || ""} ${row.agent_role || ""} ${row.project_ref || ""} ${row.session_id || ""}`.toLowerCase();
       return haystack.includes(q);
     });
   }, [allSessions, sourceFilter, projectFilter, rangeFilter, deferredQuery]);
+
+  const grouped = useMemo(() => {
+    const visibleHashes = new Set(filtered.map((row) => row.session_hash));
+    const childrenByRoot = new Map();
+    const roots = [];
+
+    for (const row of filtered) {
+      const rootHash = row.root_session_hash || row.parent_session_hash;
+      if (row.parent_session_hash && rootHash && visibleHashes.has(rootHash)) {
+        const children = childrenByRoot.get(rootHash) || [];
+        children.push(row);
+        childrenByRoot.set(rootHash, children);
+      } else {
+        // A child whose parent is outside the active search/filter remains
+        // visible as a standalone result instead of disappearing.
+        roots.push(row);
+      }
+    }
+
+    return {
+      roots,
+      childrenByRoot,
+      foldedCount: filtered.length - roots.length,
+    };
+  }, [filtered]);
 
   const anyFilter = sourceFilter !== "all" || rangeFilter !== "all" || projectFilter !== "all" || searchQuery.trim() !== "";
 
@@ -341,11 +567,29 @@ export function SessionsPage() {
   // filter doesn't leave the user scrolled into a stale slice.
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
+    setExpandedThreads(new Set());
+    setThreadModelFilters(new Map());
   }, [sourceFilter, projectFilter, rangeFilter, deferredQuery, allSessions]);
 
-  const visible = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount]);
-  const hasMore = filtered.length > visible.length;
+  const visible = useMemo(() => grouped.roots.slice(0, visibleCount), [grouped.roots, visibleCount]);
+  const hasMore = grouped.roots.length > visible.length;
   const showMore = useCallback(() => setVisibleCount((n) => n + PAGE_SIZE), []);
+  const toggleThread = useCallback((sessionHash) => {
+    setExpandedThreads((current) => {
+      const next = new Set(current);
+      if (next.has(sessionHash)) next.delete(sessionHash);
+      else next.add(sessionHash);
+      return next;
+    });
+  }, []);
+  const setThreadModel = useCallback((sessionHash, model) => {
+    setThreadModelFilters((current) => {
+      const next = new Map(current);
+      if (model === "all") next.delete(sessionHash);
+      else next.set(sessionHash, model);
+      return next;
+    });
+  }, []);
 
   // Auto-extend the window when the sentinel below the list scrolls into view.
   // The button inside it stays functional (and keyboard-reachable) when
@@ -472,7 +716,12 @@ export function SessionsPage() {
             </div>
 
             <span className="ml-auto shrink-0 tabular-nums text-oai-gray-500 dark:text-oai-gray-400">
-              {copy("sessions.filter.result_count", { filtered: filtered.length, total: allSessions.length })}
+              {grouped.foldedCount > 0
+                ? copy("sessions.thread.result_count", {
+                    roots: grouped.roots.length,
+                    subagents: grouped.foldedCount,
+                  })
+                : copy("sessions.filter.result_count", { filtered: filtered.length, total: allSessions.length })}
             </span>
           </div>
 
@@ -514,9 +763,45 @@ export function SessionsPage() {
                 <p className="mb-4 text-sm text-red-500 dark:text-red-400">{copy("shared.error.prefix", { error })}</p>
               ) : null}
               <ul className="divide-y divide-oai-gray-200/70 dark:divide-oai-gray-800/70">
-                {visible.map((session) => (
-                  <SessionRow key={session.session_hash} session={session} locale={resolvedLocale} />
-                ))}
+                {visible.map((session) => {
+                  const children = grouped.childrenByRoot.get(session.session_hash) || [];
+                  const expanded = expandedThreads.has(session.session_hash);
+                  const selectedModel = threadModelFilters.get(session.session_hash) || "all";
+                  const visibleChildren = selectedModel === "all"
+                    ? children
+                    : children.filter(function matchesSelectedModel(child) {
+                        return modelUsageRows(child).some((usage) => usage.model === selectedModel);
+                      });
+
+                  return (
+                    <React.Fragment key={session.session_hash}>
+                      <SessionRow
+                        session={session}
+                        locale={resolvedLocale}
+                        childCount={children.length}
+                        expanded={expanded}
+                        onToggle={() => toggleThread(session.session_hash)}
+                      />
+                      {expanded && children.length ? (
+                        <ThreadModelUsage
+                          sessions={children}
+                          selectedModel={selectedModel}
+                          onSelect={(model) => setThreadModel(session.session_hash, model)}
+                        />
+                      ) : null}
+                      {expanded
+                        ? visibleChildren.map((child) => (
+                            <SessionRow
+                              key={child.session_hash}
+                              session={child}
+                              locale={resolvedLocale}
+                              nested
+                            />
+                          ))
+                        : null}
+                    </React.Fragment>
+                  );
+                })}
               </ul>
               {hasMore ? (
                 <div ref={sentinelRef} className="flex justify-center pt-6">

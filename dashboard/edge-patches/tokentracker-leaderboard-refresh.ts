@@ -5,6 +5,8 @@
  */
 import { createClient } from "npm:@insforge/sdk";
 
+const SOURCES_WITH_AUTHORITATIVE_COST = new Set(["grok"]);
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -110,8 +112,27 @@ async function authorizeRefresh(req: Request): Promise<RefreshAuthorization | nu
 
 type Period = "week" | "month" | "total";
 const ALL_PERIODS: Period[] = ["week", "month", "total"];
+const TOTAL_USER_SHARDS = [
+  { from: "00000000-0000-0000-0000-000000000000", to: "20000000-0000-0000-0000-000000000000" },
+  { from: "20000000-0000-0000-0000-000000000000", to: "40000000-0000-0000-0000-000000000000" },
+  { from: "40000000-0000-0000-0000-000000000000", to: "60000000-0000-0000-0000-000000000000" },
+  { from: "60000000-0000-0000-0000-000000000000", to: "80000000-0000-0000-0000-000000000000" },
+  { from: "80000000-0000-0000-0000-000000000000", to: "a0000000-0000-0000-0000-000000000000" },
+  { from: "a0000000-0000-0000-0000-000000000000", to: "c0000000-0000-0000-0000-000000000000" },
+  { from: "c0000000-0000-0000-0000-000000000000", to: "e0000000-0000-0000-0000-000000000000" },
+  { from: "e0000000-0000-0000-0000-000000000000", to: null },
+] as const;
+const RAW_BLOCKED_LEADERBOARD_USER_IDS = Deno.env.get("LEADERBOARD_BLOCKED_USER_IDS");
+/**
+ * Whether the block list was configured at all. An unset secret and a
+ * deliberately emptied one are the same empty Set here, but they mean opposite
+ * things to the quarantine audit: with no list, every quarantined account looks
+ * like an orphan and the audit would open a public issue claiming a mass
+ * false-ban. Keep the distinction so that failure reports as degraded instead.
+ */
+const BLOCKLIST_CONFIGURED = typeof RAW_BLOCKED_LEADERBOARD_USER_IDS === "string";
 const BLOCKED_LEADERBOARD_USER_IDS = new Set(
-  (Deno.env.get("LEADERBOARD_BLOCKED_USER_IDS") ?? "")
+  (RAW_BLOCKED_LEADERBOARD_USER_IDS ?? "")
     .split(",")
     .map((id) => id.trim())
     .filter(Boolean),
@@ -163,12 +184,17 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cache_read:
   "gpt-5.4-pro": { input: 30, output: 180, cache_read: 3 },
   "gpt-5.5": { input: 5, output: 30, cache_read: 0.5 },
   // GPT-5.6 family (public 2026-07-09), developers.openai.com/api/docs/pricing.
-  // Three durable capability tiers: sol (flagship) / terra (balanced default) /
+  // Three durable capability tiers: sol (flagship and public alias) / terra (balanced) /
   // luna (lightweight). Codex reports the tier in the model id (gpt-5.6-sol,
   // + reasoning-effort variants like gpt-5.6-solhigh). Not yet in LiteLLM.
-  "gpt-5.6-sol": { input: 5, output: 30, cache_read: 0.5, cache_write: 6.25 },
+  "gpt-5.6-sol": { input: 4, output: 20, cache_read: 0.4, cache_write: 5 },
   "gpt-5.6-terra": { input: 2, output: 12, cache_read: 0.2, cache_write: 2.5 },
   "gpt-5.6-luna": { input: 0.2, output: 1.2, cache_read: 0.02, cache_write: 0.25 },
+  // GPT-6 Astra Standard USD/MTok, verified 2026-09-07:
+  // https://developers.openai.com/api/docs/models/gpt-6-astra
+  // Cloud buckets do not retain per-request context/service tier. Use the
+  // standard short-context estimate; never infer long context from totals.
+  "gpt-6-astra": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
   "gpt-5-mini": { input: 0.25, output: 2, cache_read: 0.025 },
   "o3": { input: 2, output: 8, cache_read: 0.5 },
   // ── Google Gemini ──
@@ -201,6 +227,10 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cache_read:
   //    matcher requires the user-supplied model name to CONTAIN the LiteLLM
   //    key, so the bare `glm-5.1` / `glm-4.6` strings reported by Claude
   //    Code-compatible GLM endpoints never match. Curate them here. ──
+  // GLM-5.3: flagship keeps the 5.2 list rate; Flash is a distinct cheap SKU
+  // (LiteLLM `zai/glm-5.3-flash`: $0.15/$0.50/$0.03 per MTok in/out/cache-read).
+  "glm-5.3": { input: 1.4, output: 4.4, cache_read: 0.26 },
+  "glm-5.3-flash": { input: 0.15, output: 0.5, cache_read: 0.03 },
   "glm-5.2": { input: 1.4, output: 4.4, cache_read: 0.26 },
   "glm-5.1": { input: 1.4, output: 4.4, cache_read: 0.26 },
   "glm-5": { input: 1.0, output: 3.2, cache_read: 0.2 },
@@ -282,9 +312,89 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cache_read:
   "step-3.5-flash": { input: 0.1, output: 0.3, cache_read: 0.02, cache_write: 0.1 },
 };
 const ZERO_PRICING = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+// iFlytek MaaS prices used by the AStudio source: RMB per million tokens,
+// converted at 7.2 RMB/USD and rounded to two decimal places. Models without a cache-hit
+// price use the regular input price; cache writes use the regular input price as well.
+// AStudio homepage: https://agent.xfyun.cn/
+// Official pricing source: https://maas.xfyun.cn/modelSquare
+const IFLYTEK_MAAS_MODEL_PRICING: Record<string, { input: number; output: number; cache_read: number; cache_write?: number }> = {
+  "xopglm53": { input: 1.11, output: 3.89, cache_read: 0.28, cache_write: 1.11 },
+  "xopdeepseekv4pro0813": { input: 1.25, output: 3.75, cache_read: 0.04, cache_write: 1.25 },
+  "xopdeepseekv4flash0731": { input: 0.14, output: 0.28, cache_read: 0.03, cache_write: 0.14 },
+  "xopkimik27code": { input: 0.90, output: 3.75, cache_read: 0.90, cache_write: 0.90 },
+  "xopglm52": { input: 1.11, output: 3.89, cache_read: 0.28, cache_write: 1.11 },
+  "xopdeepseekv4flash": { input: 0.14, output: 0.28, cache_read: 0.03, cache_write: 0.14 },
+  "xopkimik26": { input: 0.90, output: 3.75, cache_read: 0.18, cache_write: 0.90 },
+  "xopdeepseekv4pro": { input: 1.67, output: 3.33, cache_read: 0.14, cache_write: 1.67 },
+  "xopqwen36v35b": { input: 0.15, output: 0.90, cache_read: 0.15, cache_write: 0.15 },
+  "xophunyuan7bmt": { input: 0.07, output: 0.28, cache_read: 0.07, cache_write: 0.07 },
+  "xoppaddleocrv16": { input: 0.00, output: 0.00, cache_read: 0.00, cache_write: 0.00 },
+  "xsparkx2flash": { input: 0.14, output: 0.28, cache_read: 0.14, cache_write: 0.14 },
+  "xopglm51": { input: 1.11, output: 3.89, cache_read: 0.22, cache_write: 1.11 },
+  "xsparkx2": { input: 0.42, output: 0.42, cache_read: 0.42, cache_write: 0.42 },
+  "xop35qwen2b": { input: 0.03, output: 0.06, cache_read: 0.03, cache_write: 0.03 },
+  "xopqwen35397b": { input: 0.17, output: 1.00, cache_read: 0.17, cache_write: 0.17 },
+  "xminimaxm25": { input: 0.29, output: 1.17, cache_read: 0.29, cache_write: 0.29 },
+  "xopglm5": { input: 0.83, output: 3.06, cache_read: 0.17, cache_write: 0.83 },
+  "xopkimik25": { input: 0.56, output: 2.92, cache_read: 0.56, cache_write: 0.56 },
+  "xopdeepseekv32": { input: 0.14, output: 0.21, cache_read: 0.14, cache_write: 0.14 },
+  "xop3qwencodernext": { input: 0.35, output: 1.39, cache_read: 0.35, cache_write: 0.35 },
+  "xopglmv47flash": { input: 0.14, output: 0.21, cache_read: 0.14, cache_write: 0.14 },
+  "xopglm47blth2": { input: 0.56, output: 2.22, cache_read: 0.56, cache_write: 0.56 },
+  "xop3qwen32bvl": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "xopdeepseekocr": { input: 0.00, output: 0.00, cache_read: 0.00, cache_write: 0.00 },
+  "xophunyuanocr": { input: 0.00, output: 0.00, cache_read: 0.00, cache_write: 0.00 },
+  "xop3qwen80bnext": { input: 0.08, output: 0.33, cache_read: 0.08, cache_write: 0.08 },
+  "xop3qwen235b2507": { input: 0.17, output: 1.67, cache_read: 0.17, cache_write: 0.17 },
+  "xop3qwen30b2507": { input: 0.06, output: 0.63, cache_read: 0.06, cache_write: 0.06 },
+  "xop3qwen235b": { input: 0.17, output: 1.67, cache_read: 0.17, cache_write: 0.17 },
+  "xop3qwen30b": { input: 0.06, output: 0.63, cache_read: 0.06, cache_write: 0.06 },
+  "xop3qwen32b": { input: 0.17, output: 1.67, cache_read: 0.17, cache_write: 0.17 },
+  "xdeepseekv3": { input: 0.22, output: 0.89, cache_read: 0.22, cache_write: 0.22 },
+  "xdeepseekr1": { input: 0.44, output: 1.78, cache_read: 0.44, cache_write: 0.44 },
+  "xdeepseekr1qwen32b": { input: 0.22, output: 0.67, cache_read: 0.22, cache_write: 0.22 },
+  "xopkimik2blth": { input: 0.56, output: 2.22, cache_read: 0.56, cache_write: 0.56 },
+  "xopkimik2blins": { input: 0.56, output: 2.22, cache_read: 0.56, cache_write: 0.56 },
+  "xop3qwen8breranker": { input: 0.00, output: 0.00, cache_read: 0.00, cache_write: 0.00 },
+  "xop3qwen8bembedding": { input: 0.00, output: 0.00, cache_read: 0.00, cache_write: 0.00 },
+  "xop3qwen0b6": { input: 0.04, output: 0.42, cache_read: 0.04, cache_write: 0.04 },
+  "xop3qwen4b": { input: 0.04, output: 0.42, cache_read: 0.04, cache_write: 0.04 },
+  "xqwen257bchat": { input: 0.07, output: 0.14, cache_read: 0.07, cache_write: 0.07 },
+  "xop3qwen14b": { input: 0.14, output: 1.39, cache_read: 0.14, cache_write: 0.14 },
+  "xop3qwen8b": { input: 0.07, output: 0.69, cache_read: 0.07, cache_write: 0.07 },
+  "xsparkprox": { input: 1.11, output: 5.56, cache_read: 1.11, cache_write: 1.11 },
+  "xspark13b6k": { input: 0.28, output: 0.83, cache_read: 0.28, cache_write: 0.28 },
+  "spark mini": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "spark mini instruct": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "spark tiny": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "internlm2.5_7b_chat": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "internlm2.5_1.8b_chat": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_7b_base": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "xsqwen2d53b": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_3b_base": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_1.5b_instruct": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_1.5b_base": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_0.5b_instruct": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_0.5b_base": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "xsqwenv2s1b5c": { input: 0.14, output: 0.28, cache_read: 0.14, cache_write: 0.14 },
+  "xsqwenv2s0b5c": { input: 0.28, output: 0.56, cache_read: 0.28, cache_write: 0.28 },
+  "xqwen14bchat": { input: 0.28, output: 0.83, cache_read: 0.28, cache_write: 0.28 },
+};
+function normalizeIFlytekMaasModel(model: string) {
+  const lower = model.trim().toLowerCase();
+  if (lower === "xsparkx2agent") return "xsparkx2";
+  return lower;
+}
 
-function getModelPricing(model: string) {
+function getModelPricing(model: string, source = "") {
   if (!model) return ZERO_PRICING;
+  if (source.toLowerCase() === "acode") {
+    const normalized = normalizeIFlytekMaasModel(model);
+    // Undisclosed routing must not inherit generic aliases or fuzzy prices.
+    if (normalized === "auto" || normalized.endsWith("-auto")) return ZERO_PRICING;
+    const iFlytekMaasPricing = IFLYTEK_MAAS_MODEL_PRICING[normalized];
+    if (iFlytekMaasPricing) return iFlytekMaasPricing;
+  }
   const exact = MODEL_PRICING[model];
   if (exact) return exact;
   const lower = model.toLowerCase();
@@ -296,13 +406,14 @@ function getModelPricing(model: string) {
   if (lower.includes("opus")) return MODEL_PRICING["claude-opus-4-6"];
   if (lower.includes("haiku")) return MODEL_PRICING["claude-haiku-4-5-20251001"];
   if (lower.includes("sonnet")) return MODEL_PRICING["claude-sonnet-4-6"];
+  if (lower.includes("gpt-6-astra")) return MODEL_PRICING["gpt-6-astra"];
   // gpt-5.6 tiers: sol/terra/luna carry reasoning-effort suffixes (solhigh,
   // etc.), so match by substring. Specific tiers precede the generic gpt-5.6
-  // fallback (which defaults to the balanced terra tier).
+  // fallback (the public gpt-5.6 alias points to the flagship sol tier).
   if (lower.includes("gpt-5.6-sol")) return MODEL_PRICING["gpt-5.6-sol"];
   if (lower.includes("gpt-5.6-terra")) return MODEL_PRICING["gpt-5.6-terra"];
   if (lower.includes("gpt-5.6-luna")) return MODEL_PRICING["gpt-5.6-luna"];
-  if (lower.includes("gpt-5.6")) return MODEL_PRICING["gpt-5.6-terra"];
+  if (lower.includes("gpt-5.6")) return MODEL_PRICING["gpt-5.6-sol"];
   if (lower.includes("gpt-5.4-pro")) return MODEL_PRICING["gpt-5.4-pro"];
   if (lower.includes("gpt-5.4")) return MODEL_PRICING["gpt-5.4"];
   if (lower.includes("gpt-5.5")) return MODEL_PRICING["gpt-5.5"];
@@ -362,6 +473,8 @@ function getModelPricing(model: string) {
   if (lower.includes("glm-4.7-flash")) return MODEL_PRICING["glm-4.7-flash"];
   if (lower.includes("glm-4.7")) return MODEL_PRICING["glm-4.7"];
   if (lower.includes("glm-4.6")) return MODEL_PRICING["glm-4.6"];
+  if (lower.includes("glm-5.3-flash")) return MODEL_PRICING["glm-5.3-flash"];
+  if (lower.includes("glm-5.3")) return MODEL_PRICING["glm-5.3"];
   if (lower.includes("glm-5-turbo")) return MODEL_PRICING["glm-5-turbo"];
   if (lower.includes("glm-5.2")) return MODEL_PRICING["glm-5.2"];
   if (lower.includes("glm-5.1")) return MODEL_PRICING["glm-5.1"];
@@ -380,8 +493,9 @@ function getModelPricing(model: string) {
   return ZERO_PRICING;
 }
 
-function getRowPricing(row: { model?: string; hour_start?: string; pricing_tier?: string }) {
-  const pricing = getModelPricing(row.model || "");
+function getRowPricing(row: { model?: string; source?: string; hour_start?: string; pricing_tier?: string }) {
+  const pricing = getModelPricing(row.model || "", row.source);
+  if ((row.source || "").toLowerCase() === "acode") return pricing;
   const lower = String(row.model || "").toLowerCase();
   if (!lower.includes("deepseek-v4-flash") && !lower.includes("deepseek-v4-pro")) return pricing;
   let offPeak = row.pricing_tier === "off_peak";
@@ -407,23 +521,37 @@ function getRowPricing(row: { model?: string; hour_start?: string; pricing_tier?
 }
 
 function computeRowCost(row: HourlyRow): number {
+  // LM Studio developer-server and LM Link traffic is local inference. Its
+  // logs do not represent Bionic Secure Cloud billing.
+  if (row.source === "lmstudio") return 0;
   // Pi's GitHub Copilot provider is subscription-backed. Keep its token
   // counts, but do not reprice the recorded Claude model as Anthropic API use.
   if (row.source === "pi-github-copilot" || row.source === "pi-copilot") return 0;
+  const reportedCost = Number(row.total_cost_usd);
+  if (
+    SOURCES_WITH_AUTHORITATIVE_COST.has(row.source) &&
+    Number.isFinite(reportedCost) &&
+    reportedCost > 0
+  ) return reportedCost;
   // WorkBuddy's auto-router logs model="auto"; price it as its default Hunyuan
   // model (hy3-preview-agent) so it isn't billed as Cursor's composer-1. Mirrors
   // normalizeWorkbuddyModel in src/lib/pricing/matcher.js.
-  const modelForPricing =
-    row.source === "workbuddy" && (row.model || "").toLowerCase() === "auto"
+  const rawModel = String(row.model || "").trim();
+  const unslothUnpriced =
+    row.source === "unsloth" && /^(local|unpriced)\//i.test(rawModel);
+  const modelForPricing = unslothUnpriced
+    ? "__tokentracker_unpriced_unsloth_model__"
+    : row.source === "workbuddy" && rawModel.toLowerCase() === "auto"
       ? "hy3-preview-agent"
-      : row.model;
+      : rawModel;
   const p = getRowPricing({ ...row, model: modelForPricing });
   // For Codex-family rollouts, `output_tokens` already includes any reasoning
   // tokens (OpenAI API convention), so `reasoning_output_tokens * output_rate`
   // would double-charge the reasoning slice. Kept explicit for other sources
   // where reasoning is NOT guaranteed to be folded into output_tokens.
   // Must stay in lockstep with local-api.js:computeRowCost.
-  const reasoningIncludedInOutput = row.source === "codex" || row.source === "every-code";
+  const reasoningIncludedInOutput =
+    row.source === "codex" || row.source === "acode" || row.source === "every-code";
   const reasoningCost = reasoningIncludedInOutput
     ? 0
     : (row.reasoning_output_tokens || 0) * (p.output || 0);
@@ -499,6 +627,7 @@ interface HourlyRow {
   cached_input_tokens: number;
   cache_creation_input_tokens: number;
   reasoning_output_tokens: number;
+  total_cost_usd?: number | null;
   pricing_tier?: string;
 }
 
@@ -611,19 +740,99 @@ async function anomalyQueueSummary(
   }
 }
 
+/**
+ * GET ?quarantine_audit=1 — counts-only moderation self-audit.
+ *
+ * Answers the question the anomaly detector never asks: "does the data we
+ * withheld still match the accounts we actually banned?" On 2026-07-21 a batch
+ * quarantine moved rows for 40 users while only 8 reached the block list; the
+ * other 32 had 51.1B tokens withheld for five weeks and it surfaced only when
+ * one of them opened issue #534. A ban is a decision someone made on purpose,
+ * but data quarantined for an account nobody banned is a plain contradiction,
+ * so it can be detected without any judgement call.
+ *
+ * Returns COUNTS ONLY, never user_ids — same reason as the anomaly summary:
+ * the caller is a public CI log.
+ */
+async function quarantineAuditData(
+  client: ReturnType<typeof createClient>,
+): Promise<{
+  ok: true;
+  blocklist_configured: boolean;
+  orphan_users: number;
+  orphan_rows: number;
+  orphan_tokens: number;
+  oldest_orphan_quarantined_at: string | null;
+  blocked_total: number;
+  blocked_without_flags: number;
+}> {
+  // Without a block list every quarantined account is trivially an "orphan".
+  // Report the degraded state rather than a fabricated mass-false-ban.
+  if (!BLOCKLIST_CONFIGURED) {
+    return {
+      ok: true,
+      blocklist_configured: false,
+      orphan_users: 0,
+      orphan_rows: 0,
+      orphan_tokens: 0,
+      oldest_orphan_quarantined_at: null,
+      blocked_total: 0,
+      blocked_without_flags: 0,
+    };
+  }
+  const { data, error } = await client.database.rpc(
+    "leaderboard_quarantine_audit",
+    { p_blocked: [...BLOCKED_LEADERBOARD_USER_IDS] },
+  );
+  if (error) throw new Error(error.message);
+  const row = (Array.isArray(data) && data.length > 0
+    ? data[0]
+    : {}) as Record<string, unknown>;
+  const num = (value: unknown) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  };
+  return {
+    ok: true,
+    blocklist_configured: true,
+    orphan_users: num(row.orphan_users),
+    orphan_rows: num(row.orphan_rows),
+    orphan_tokens: num(row.orphan_tokens),
+    oldest_orphan_quarantined_at:
+      typeof row.oldest_orphan_quarantined_at === "string"
+        ? row.oldest_orphan_quarantined_at
+        : null,
+    blocked_total: num(row.blocked_total),
+    blocked_without_flags: num(row.blocked_without_flags),
+  };
+}
+
+async function quarantineAudit(
+  client: ReturnType<typeof createClient>,
+): Promise<Response> {
+  try {
+    return json(await quarantineAuditData(client));
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : String(error) }, 500);
+  }
+}
+
 export default async function (req: Request): Promise<Response> {
   if (req.method === "OPTIONS")
     return new Response(null, { status: 204, headers: corsHeaders });
 
+  const requestParams = new URL(req.url).searchParams;
   const wantsAnomalySummary =
-    req.method === "GET" &&
-    new URL(req.url).searchParams.get("anomalies") === "1";
-  if (req.method !== "POST" && !wantsAnomalySummary)
+    req.method === "GET" && requestParams.get("anomalies") === "1";
+  const wantsQuarantineAudit =
+    req.method === "GET" && requestParams.get("quarantine_audit") === "1";
+  const wantsPublicRead = wantsAnomalySummary || wantsQuarantineAudit;
+  if (req.method !== "POST" && !wantsPublicRead)
     return json({ error: "Method not allowed" }, 405);
 
-  // The read-only anomaly summary is unauthenticated (it exposes no identities);
+  // The read-only summaries are unauthenticated (they expose no identities);
   // everything else still requires the refresh secret / service role / sign-in.
-  const authorization = wantsAnomalySummary ? "public" : await authorizeRefresh(req);
+  const authorization = wantsPublicRead ? "public" : await authorizeRefresh(req);
   if (!authorization) return json({ error: "unauthorized" }, 401);
   const requestStartedAt = Date.now();
 
@@ -647,7 +856,11 @@ export default async function (req: Request): Promise<Response> {
     ...(anonKey ? { headers: { apikey: anonKey } } : {}),
   });
 
-  if (authorization === "public") return await anomalyQueueSummary(client);
+  if (authorization === "public") {
+    return wantsQuarantineAudit
+      ? await quarantineAudit(client)
+      : await anomalyQueueSummary(client);
+  }
 
   // Parse requested periods
   const body = await req.json().catch(() => ({})) as Record<string, unknown>;
@@ -810,10 +1023,42 @@ export default async function (req: Request): Promise<Response> {
     }
 
     const __t0 = Date.now();
-    const { data: groupedData, error: rpcErr } = await client.database.rpc(
-      "leaderboard_usage_grouped",
-      { p_from: rangeStart, p_to: rangeEnd },
-    );
+    let groupedData: unknown;
+    let rpcErr: { message: string } | null = null;
+    if (period === "total") {
+      // A single all-time RPC response eventually exceeded the database
+      // client's fixed 10s transport budget even after the historical scan was
+      // replaced by a compact rollup. Eight disjoint UUID ranges keep every
+      // response bounded while retaining model/pricing-tier rows for the one
+      // canonical TypeScript pricing implementation below.
+      const totalRows: unknown[] = [];
+      for (let shardIndex = 0; shardIndex < TOTAL_USER_SHARDS.length; shardIndex += 2) {
+        const shardBatch = await Promise.all(
+          TOTAL_USER_SHARDS.slice(shardIndex, shardIndex + 2).map(({ from, to }) =>
+            client.database.rpc(
+              "leaderboard_usage_grouped_total_shard",
+              { p_to: rangeEnd, p_user_from: from, p_user_to: to },
+            )
+          ),
+        );
+        const failedShard = shardBatch.find((result) => result.error);
+        if (failedShard?.error) {
+          rpcErr = failedShard.error;
+          break;
+        }
+        for (const result of shardBatch) {
+          if (Array.isArray(result.data)) totalRows.push(...result.data);
+        }
+      }
+      groupedData = rpcErr ? null : totalRows;
+    } else {
+      const result = await client.database.rpc(
+        "leaderboard_usage_grouped",
+        { p_from: rangeStart, p_to: rangeEnd },
+      );
+      groupedData = result.data;
+      rpcErr = result.error;
+    }
     const __tAfterRpc = Date.now();
     if (rpcErr) {
       logRefreshEvent({
@@ -827,7 +1072,7 @@ export default async function (req: Request): Promise<Response> {
         error: rpcErr.message,
         duration_ms: Date.now() - periodStartedAt,
       });
-      return json({ error: rpcErr.message }, 500);
+      return json({ error: rpcErr.message, stage: "rpc_aggregate" }, 500);
     }
     const grouped = (Array.isArray(groupedData) ? groupedData : []) as HourlyRow[];
     const scannedRows = grouped.length; // pre-aggregated groups (not raw rows)

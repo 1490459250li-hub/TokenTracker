@@ -616,7 +616,12 @@ final class PetCatalog: ObservableObject {
     static let shared = PetCatalog()
     private static let builtins: [PetCharacter] = [.clawd, .bot, .sprout, .byte, .ember]
     private static let hiddenBuiltinsFilename = ".hidden-builtins.json"
-    private struct Metadata { let displayName: String; let spriteVersionNumber: Int; let atlasURL: URL }
+    private struct Metadata {
+        let displayName: String
+        let spriteVersionNumber: Int
+        let atlasURL: URL
+        let atlasCacheKey: String
+    }
 
     @Published private(set) var characters: [PetCharacter] = builtins
     private var metadata: [String: Metadata] = [:]
@@ -668,11 +673,15 @@ final class PetCatalog: ObservableObject {
                       let displayName = object["displayName"] as? String,
                       !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                 let version = (object["spriteVersionNumber"] as? NSNumber)?.intValue == 2 ? 2 : 1
+                let attributes = try? FileManager.default.attributesOfItem(atPath: atlasURL.path)
+                let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                let size = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
                 seen.insert(character.rawValue)
                 discovered.append((character, Metadata(
                     displayName: displayName,
                     spriteVersionNumber: version,
-                    atlasURL: atlasURL
+                    atlasURL: atlasURL,
+                    atlasCacheKey: "\(character.rawValue)-\(modified)-\(size)"
                 )))
             }
         }
@@ -699,13 +708,7 @@ final class PetCatalog: ObservableObject {
             ?? Bundle.main.url(forResource: name, withExtension: "png")
     }
     func atlasCacheKey(for character: PetCharacter) -> String {
-        guard let url = metadata[character.rawValue]?.atlasURL,
-              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else {
-            return character.rawValue
-        }
-        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
-        return "\(character.rawValue)-\(modified)-\(size)"
+        metadata[character.rawValue]?.atlasCacheKey ?? character.rawValue
     }
 }
 

@@ -58,6 +58,12 @@ export const PROVIDER_LIMIT_SPECS = {
           window: data.tertiary_window,
           windowSecondsField: "limit_window_seconds",
         },
+        {
+          key: "grok-bot",
+          labelKey: "limits.label.cursor_grok_bot",
+          window: data.quaternary_window,
+          windowSecondsField: "limit_window_seconds",
+        },
       ];
     },
   },
@@ -201,6 +207,40 @@ export const PROVIDER_LIMIT_SPECS = {
       ];
     },
   },
+  commandCode: {
+    // CommandCode subscription: 5h + weekly rolling windows over included
+    // monthly credits. Server-defined caps (client-trusted used% only), so no
+    // windowSeconds-based pacing projection — mirrors opencodeGo.
+    windows(data) {
+      return [
+        { key: "5h", labelKey: "limits.label.command_code_5h", window: data.primary_window },
+        { key: "weekly", labelKey: "limits.label.command_code_weekly", window: data.secondary_window },
+      ];
+    },
+  },
+  agentPlan: {
+    // Volcano Ark Agent Plan quota refreshes on three windows: a rolling
+    // 5-hour (5h), a weekly, and a monthly one. Percentages come straight
+    // from arkcli's usage plan payload; no client-side pacing data.
+    windows(data) {
+      return [
+        { key: "5h", labelKey: "limits.label.ark_agent_plan_5h", window: data.primary_window },
+        { key: "weekly", labelKey: "limits.label.ark_agent_plan_weekly", window: data.secondary_window },
+        { key: "monthly", labelKey: "limits.label.ark_agent_plan_monthly", window: data.tertiary_window },
+      ];
+    },
+  },
+  devin: {
+    // Devin subscription quota: fixed daily + weekly windows straight from the
+    // official GetPlanStatus RPC. The server supplies each window's reset time
+    // and length (86400/604800), so pacing uses `limit_window_seconds`.
+    windows(data) {
+      return [
+        { key: "daily", labelKey: "limits.label.devin_daily", window: data.primary_window, windowSecondsField: "limit_window_seconds" },
+        { key: "weekly", labelKey: "limits.label.devin_weekly", window: data.secondary_window, windowSecondsField: "limit_window_seconds" },
+      ];
+    },
+  },
 };
 
 /** Static copy() anchors for validate:copy — labels resolve at runtime via spec.labelKey. */
@@ -219,6 +259,7 @@ export function usageLimitsLabelCopyAnchor() {
     copy("limits.label.cursor_plan"),
     copy("limits.label.cursor_auto"),
     copy("limits.label.cursor_api"),
+    copy("limits.label.cursor_grok_bot"),
     copy("limits.label.gemini_pro"),
     copy("limits.label.gemini_flash"),
     copy("limits.label.gemini_lite"),
@@ -249,8 +290,15 @@ export function usageLimitsLabelCopyAnchor() {
     copy("limits.label.qoder_ultimate"),
     copy("limits.label.qoder_cn_credits"),
     copy("limits.label.qoder_cn_ultimate"),
+    copy("limits.label.command_code_5h"),
+    copy("limits.label.command_code_weekly"),
     copy("limits.label.ark_coding_plan_5h"),
     copy("limits.label.ark_coding_plan_weekly"),
     copy("limits.label.ark_coding_plan_monthly"),
+    copy("limits.label.ark_agent_plan_5h"),
+    copy("limits.label.ark_agent_plan_weekly"),
+    copy("limits.label.ark_agent_plan_monthly"),
+    copy("limits.label.devin_daily"),
+    copy("limits.label.devin_weekly"),
   ];
 }

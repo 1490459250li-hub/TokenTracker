@@ -6,6 +6,7 @@ const { test } = require("node:test");
 
 const { cmdSync } = require("../src/commands/sync");
 const { openLock } = require("../src/lib/fs");
+const { DEFAULT_ANON_KEY } = require("../src/lib/runtime-config");
 
 function tokenCountLine({ ts, totalTokens }) {
   const usage = {
@@ -37,6 +38,39 @@ async function writeEveryCodeRollout(codeHome, date, uuid, totalTokens) {
   await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, `rollout-${date}T00-00-00-${uuid}.jsonl`);
   await fs.writeFile(filePath, tokenCountLine({ ts: `${date}T00:00:00.000Z`, totalTokens }) + "\n", "utf8");
+  return filePath;
+}
+
+async function writeAcodeRollout(acodeHome, date, uuid, totalTokens) {
+  const [year, month, day] = date.split("-");
+  const dir = path.join(acodeHome, "sessions", year, month, day);
+  await fs.mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, `rollout-${date}T00-00-00-${uuid}.jsonl`);
+  const body = [
+    JSON.stringify({
+      type: "turn_context",
+      timestamp: `${date}T00:00:00.000Z`,
+      payload: { model: "xopglm52" },
+    }),
+    tokenCountLine({ ts: `${date}T00:00:01.000Z`, totalTokens }),
+  ].join("\n") + "\n";
+  await fs.writeFile(filePath, body, "utf8");
+  return filePath;
+}
+
+async function writeArchivedAcodeRollout(acodeHome, date, uuid, totalTokens) {
+  const dir = path.join(acodeHome, "archived_sessions");
+  await fs.mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, `rollout-${date}T00-00-00-${uuid}.jsonl`);
+  const body = [
+    JSON.stringify({
+      type: "turn_context",
+      timestamp: `${date}T00:00:00.000Z`,
+      payload: { model: "xopglm52" },
+    }),
+    tokenCountLine({ ts: `${date}T00:00:01.000Z`, totalTokens }),
+  ].join("\n") + "\n";
+  await fs.writeFile(filePath, body, "utf8");
   return filePath;
 }
 
@@ -103,6 +137,7 @@ async function withTempSyncEnv(fn) {
     USERPROFILE: process.env.USERPROFILE,
     CODEX_HOME: process.env.CODEX_HOME,
     CODE_HOME: process.env.CODE_HOME,
+    TOKENTRACKER_ACODE_HOME: process.env.TOKENTRACKER_ACODE_HOME,
     GEMINI_HOME: process.env.GEMINI_HOME,
     OPENCODE_HOME: process.env.OPENCODE_HOME,
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
@@ -110,6 +145,7 @@ async function withTempSyncEnv(fn) {
     REASONIX_STATE_HOME: process.env.REASONIX_STATE_HOME,
     TOKENTRACKER_DEVICE_TOKEN: process.env.TOKENTRACKER_DEVICE_TOKEN,
     TOKENTRACKER_INSFORGE_BASE_URL: process.env.TOKENTRACKER_INSFORGE_BASE_URL,
+    TOKENTRACKER_INSFORGE_ANON_KEY: process.env.TOKENTRACKER_INSFORGE_ANON_KEY,
     TOKENTRACKER_OPENCLAW_HOME: process.env.TOKENTRACKER_OPENCLAW_HOME,
     TOKENTRACKER_OPENCLAW_AGENT_ID: process.env.TOKENTRACKER_OPENCLAW_AGENT_ID,
     TOKENTRACKER_OPENCLAW_PREV_SESSION_ID: process.env.TOKENTRACKER_OPENCLAW_PREV_SESSION_ID,
@@ -120,6 +156,7 @@ async function withTempSyncEnv(fn) {
     process.env.USERPROFILE = home;
     process.env.CODEX_HOME = path.join(home, ".codex");
     process.env.CODE_HOME = path.join(home, ".code");
+    process.env.TOKENTRACKER_ACODE_HOME = path.join(home, ".acode");
     process.env.GEMINI_HOME = path.join(home, ".gemini");
     process.env.OPENCODE_HOME = path.join(home, ".opencode");
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
@@ -128,6 +165,7 @@ async function withTempSyncEnv(fn) {
     delete process.env.REASONIX_STATE_HOME;
     delete process.env.TOKENTRACKER_DEVICE_TOKEN;
     delete process.env.TOKENTRACKER_INSFORGE_BASE_URL;
+    delete process.env.TOKENTRACKER_INSFORGE_ANON_KEY;
     delete process.env.TOKENTRACKER_OPENCLAW_AGENT_ID;
     delete process.env.TOKENTRACKER_OPENCLAW_PREV_SESSION_ID;
     delete process.env.TOKENTRACKER_OPENCLAW_SESSION_KEY;
@@ -324,6 +362,23 @@ test("Codex notify sync accepts an explicit null context", async () => {
   });
 });
 
+test("Codex notify sync does not create Acode inventory state", async () => {
+  await withTempSyncEnv(async (home) => {
+    await writeCodexRollout(
+      process.env.CODEX_HOME,
+      "2026-06-30",
+      "019f16bd-1007-7000-8000-aaaaaaaaaaaa",
+      41,
+    );
+
+    await cmdSync(["--auto", "--from-notify", "--source=codex"]);
+
+    const cursors = await readCursors(home);
+    assert.ok(cursors.codexDayInventoryCache);
+    assert.equal(Object.hasOwn(cursors, "acodeDayInventoryCache"), false);
+  });
+});
+
 test("background auto sync still includes Every Code sessions", async () => {
   await withTempSyncEnv(async (home) => {
     const codeHome = process.env.CODE_HOME;
@@ -334,6 +389,74 @@ test("background auto sync still includes Every Code sessions", async () => {
     const queue = await readQueue(home);
     assert.match(queue, /"source":"every-code"/);
     assert.match(queue, /"total_tokens":42/);
+  });
+});
+
+test("background auto sync includes live Acode sessions but skips archives", async () => {
+  await withTempSyncEnv(async (home) => {
+    const acodeHome = process.env.TOKENTRACKER_ACODE_HOME;
+    await writeAcodeRollout(acodeHome, "2026-06-30", "019f16bd-1100-7000-8000-aaaaaaaaaaaa", 43);
+    await writeArchivedAcodeRollout(acodeHome, "2026-06-30", "019f16bd-1101-7000-8000-aaaaaaaaaaaa", 47);
+
+    await cmdSync(["--auto", "--background"]);
+
+    const rows = (await readQueue(home)).trim().split("\n").map(JSON.parse);
+    const acodeRows = rows.filter((row) => row.source === "acode");
+    assert.equal(acodeRows.length, 1);
+    assert.equal(acodeRows[0].model, "xopglm52");
+    assert.equal(acodeRows[0].total_tokens, 43);
+  });
+});
+
+test("Acode notify sync only scans Acode sessions", async () => {
+  await withTempSyncEnv(async (home) => {
+    await writeCodexRollout(
+      process.env.CODEX_HOME,
+      "2026-06-30",
+      "019f16bd-1102-7000-8000-aaaaaaaaaaaa",
+      53,
+    );
+    await writeAcodeRollout(
+      process.env.TOKENTRACKER_ACODE_HOME,
+      "2026-06-30",
+      "019f16bd-1103-7000-8000-aaaaaaaaaaaa",
+      59,
+    );
+
+    await cmdSync(["--auto", "--from-notify", "--source=acode"]);
+
+    const rows = (await readQueue(home)).trim().split("\n").map(JSON.parse);
+    assert.deepEqual(rows.map((row) => row.source), ["acode"]);
+    assert.equal(rows[0].total_tokens, 59);
+  });
+});
+
+test("full sync scans Acode archives without recounting a live session copy", async () => {
+  await withTempSyncEnv(async (home) => {
+    const acodeHome = process.env.TOKENTRACKER_ACODE_HOME;
+    const duplicateUuid = "019f16bd-1104-7000-8000-aaaaaaaaaaaa";
+    const liveFile = await writeAcodeRollout(acodeHome, "2026-06-30", duplicateUuid, 61);
+    const archivedDuplicate = path.join(
+      acodeHome,
+      "archived_sessions",
+      path.basename(liveFile),
+    );
+    await fs.mkdir(path.dirname(archivedDuplicate), { recursive: true });
+    await fs.copyFile(liveFile, archivedDuplicate);
+    await writeArchivedAcodeRollout(
+      acodeHome,
+      "2026-06-30",
+      "019f16bd-1105-7000-8000-aaaaaaaaaaaa",
+      67,
+    );
+
+    await cmdSync([]);
+
+    const rows = (await readQueue(home)).trim().split("\n").map(JSON.parse);
+    const acodeRows = rows.filter((row) => row.source === "acode");
+    assert.equal(acodeRows.at(-1).total_tokens, 128);
+    const cursors = await readCursors(home);
+    assert.equal(cursors.acodeHashes.length, 2);
   });
 });
 
@@ -411,6 +534,37 @@ test("all-local background sync includes Reasonix telemetry", async () => {
 
     await cmdSync(["--auto", "--background", "--all-local-sources"]);
     assert.equal(await readQueue(home), firstQueue);
+  });
+});
+
+test("all-local background sync refreshes Cursor while default background stays offline", async () => {
+  await withTempSyncEnv(async (home) => {
+    let fetchCalls = 0;
+    const csvText = `Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+"2026-06-30T10:15:00.000Z","Included","composer-2-fast","No","120","100","30","40","190","0.01"`;
+    const context = {
+      cursorSyncDeps: {
+        isInstalled: () => true,
+        extractAuth: () => ({ cookie: "WorkosCursorSessionToken=test", userId: "user_test" }),
+        fetchUsageCsv: async () => {
+          fetchCalls += 1;
+          return csvText;
+        },
+      },
+    };
+
+    await cmdSync(["--auto", "--background"], context);
+    assert.equal(fetchCalls, 0, "ordinary background sync must remain local-only");
+
+    await cmdSync(["--auto", "--background", "--all-local-sources"], context);
+    assert.equal(fetchCalls, 1, "explicit all-local background sync must honor Cursor");
+    const firstQueue = await readQueue(home);
+    assert.match(firstQueue, /"source":"cursor"/);
+    assert.match(firstQueue, /"model":"composer-2-fast"/);
+
+    await cmdSync(["--auto", "--background", "--all-local-sources"], context);
+    assert.equal(fetchCalls, 2);
+    assert.equal(await readQueue(home), firstQueue, "the repeated full-history CSV is idempotent");
   });
 });
 
@@ -495,9 +649,11 @@ test("explicit account publication uploads after bounded background parsing", as
     process.env.TOKENTRACKER_INSFORGE_BASE_URL = "https://cloud.example";
     const originalFetch = global.fetch;
     let ingestCalls = 0;
-    global.fetch = async (url) => {
+    let ingestHeaders = null;
+    global.fetch = async (url, options = {}) => {
       if (String(url).endsWith("/functions/tokentracker-ingest")) {
         ingestCalls += 1;
+        ingestHeaders = options.headers;
         return {
           ok: true,
           status: 200,
@@ -515,6 +671,7 @@ test("explicit account publication uploads after bounded background parsing", as
     }
 
     assert.equal(ingestCalls, 1);
+    assert.equal(ingestHeaders.apikey, DEFAULT_ANON_KEY);
     const queueState = JSON.parse(
       await fs.readFile(path.join(home, ".tokentracker", "tracker", "queue.state.json"), "utf8"),
     );

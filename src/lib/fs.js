@@ -6,12 +6,21 @@ async function ensureDir(p) {
   await fs.mkdir(p, { recursive: true });
 }
 
-async function writeFileAtomic(filePath, content) {
+async function writeFileAtomic(filePath, content, { mode } = {}) {
   const dir = path.dirname(filePath);
   await ensureDir(dir);
-  const tmp = `${filePath}.tmp.${Date.now()}`;
+  // Include a UUID so two writes in the same millisecond do not share a tmp
+  // path (Date.now() alone collides under concurrent writers).
+  const tmp = `${filePath}.tmp.${Date.now()}.${crypto.randomUUID()}`;
+  // mode only applies to newly created files; passing it keeps the tmp file
+  // private from creation instead of relying on a later chmod that a crash
+  // between write and chmod would skip.
   try {
-    await fs.writeFile(tmp, content, { encoding: "utf8" });
+    await fs.writeFile(
+      tmp,
+      content,
+      mode == null ? { encoding: "utf8" } : { encoding: "utf8", mode },
+    );
     await fs.rename(tmp, filePath);
   } catch (err) {
     try {
@@ -404,6 +413,35 @@ async function openLock(
   }
 }
 
+async function updateJsonLocked(
+  filePath,
+  update,
+  { timeoutMs = 30_000, retryMs = 10 } = {},
+) {
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + timeoutMs;
+  let lock = null;
+  while (!lock) {
+    lock = await openLock(lockPath, { quietIfLocked: true });
+    if (lock) break;
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting to update JSON file: ${filePath}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, retryMs));
+  }
+
+  try {
+    const current = (await readJson(filePath)) || {};
+    const next = await update(current);
+    if (next == null) return current;
+    await writeJson(filePath, next);
+    await chmod600IfPossible(filePath);
+    return next;
+  } finally {
+    await lock.release();
+  }
+}
+
 module.exports = {
   ensureDir,
   writeFileAtomic,
@@ -413,4 +451,5 @@ module.exports = {
   chmod600IfPossible,
   openLock,
   inspectLock,
+  updateJsonLocked,
 };

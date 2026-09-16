@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { getCopyLocale, setCopyLocale } from "./copy";
+import { ZH_CN_LOCALE } from "./locale";
 import {
   buildPetLimitSummary,
   buildPetLimitSummaries,
@@ -42,6 +44,73 @@ describe("desktop pet limit dialogue", () => {
     const atLimit = formatPetLimitSummary("en", { ...reading, usedPercent: 100 });
     expect(atLimit).toContain("Codex 5h · at limit");
     expect(atLimit).not.toMatch(/\d+%/);
+  });
+
+  it("surfaces Command Code 5h/weekly windows when they are partially used", () => {
+    const limits = {
+      commandCode: {
+        configured: true,
+        error: null,
+        primary_window: { used_percent: 42, reset_at: "2099-01-01T00:00:00Z" },
+        secondary_window: { used_percent: 3, reset_at: "2099-01-02T00:00:00Z" },
+      },
+      // A configured-but-empty provider contributes no pet line.
+      opencodeGo: { configured: true, error: null, primary_window: { used_percent: 0, reset_at: 0 } },
+    };
+
+    const readings = buildPetLimitSummaries(limits);
+    expect(readings.map(({ provider, window }) => `${provider} ${window}`)).toEqual([
+      "Command Code 5h",
+      "Command Code Weekly",
+    ]);
+  });
+
+  it("resolves Command Code labels through the copy registry per locale (review 594)", () => {
+    const prevLocale = getCopyLocale();
+    try {
+      setCopyLocale(ZH_CN_LOCALE);
+      const limits = {
+        commandCode: {
+          configured: true,
+          error: null,
+          primary_window: { used_percent: 42, reset_at: "2099-01-01T00:00:00Z" },
+          secondary_window: { used_percent: 3, reset_at: "2099-01-02T00:00:00Z" },
+        },
+      };
+
+      const readings = buildPetLimitSummaries(limits);
+      // The provider name stays the brand; the weekly window must come from
+      // the zh-CN registry (每周), not a hardcoded English literal.
+      expect(readings.map(({ provider, window }) => `${provider} ${window}`)).toEqual([
+        "Command Code 5h",
+        "Command Code 每周",
+      ]);
+    } finally {
+      setCopyLocale(prevLocale);
+    }
+  });
+
+  it("surfaces Devin daily/weekly windows with localized labels", () => {
+    const prevLocale = getCopyLocale();
+    try {
+      setCopyLocale(ZH_CN_LOCALE);
+      const limits = {
+        devin: {
+          configured: true,
+          error: null,
+          primary_window: { used_percent: 60, reset_at: "2099-01-01T00:00:00Z" },
+          secondary_window: { used_percent: 10, reset_at: "2099-01-02T00:00:00Z" },
+        },
+      };
+
+      const readings = buildPetLimitSummaries(limits);
+      expect(readings.map(({ provider, window }) => `${provider} ${window}`)).toEqual([
+        "Devin 每日",
+        "Devin 每周",
+      ]);
+    } finally {
+      setCopyLocale(prevLocale);
+    }
   });
 
   it("adds the limit line to the tap conversation without replacing token quips", () => {

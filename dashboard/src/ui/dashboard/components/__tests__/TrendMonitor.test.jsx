@@ -11,6 +11,7 @@ import {
   TrendMonitor,
   computeInterpolatedSeries,
   getTrendMonitorScale,
+  mergeModelSegments,
 } from "../TrendMonitor.jsx";
 
 describe("getTrendMonitorScale", () => {
@@ -144,6 +145,18 @@ describe("TrendMonitor", () => {
     fireEvent.mouseLeave(tooltip);
     act(() => vi.advanceTimersByTime(200));
     expect(container.querySelector('[data-trend-tooltip="true"]')).toBeNull();
+  });
+
+  it("merges model segments whose names differ only by case", () => {
+    expect(mergeModelSegments({
+      "GPT-5.5": 120,
+      "gpt-5.5": 80,
+      "Claude-Sonnet": 40,
+      " claude-sonnet ": 10,
+    })).toEqual([
+      { type: "model", name: "GPT-5.5", value: 200 },
+      { type: "model", name: "Claude-Sonnet", value: 50 },
+    ]);
   });
 });
 

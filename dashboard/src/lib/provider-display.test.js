@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { formatProviderDisplayName } from "./provider-display.js";
 
 describe("formatProviderDisplayName", () => {
+  it.each([
+    ["lmstudio", "LM Studio"],
+    ["unsloth", "Unsloth Studio"],
+  ])("formats %s with its product casing", (value, expected) => {
+    expect(formatProviderDisplayName(value)).toBe(expected);
+  });
+
   it.each(["anythingllm", "AnythingLLM", "anything-llm", "anything_llm"])(
     "normalizes %s to the official AnythingLLM casing",
     (value) => {
@@ -13,6 +20,11 @@ describe("formatProviderDisplayName", () => {
     expect(formatProviderDisplayName("cursor")).toBe("Cursor");
     expect(formatProviderDisplayName("CODEX")).toBe("CODEX");
     expect(formatProviderDisplayName("")).toBe("");
+  });
+
+  it("uses the AStudio product name", () => {
+    expect(formatProviderDisplayName("acode")).toBe("AStudio");
+    expect(formatProviderDisplayName("ACODE")).toBe("AStudio");
   });
 
   it("gives Pi routed providers distinct readable names", () => {

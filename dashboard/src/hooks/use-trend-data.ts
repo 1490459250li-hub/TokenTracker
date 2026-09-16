@@ -144,6 +144,15 @@ export function useTrendData({
     sharedRows,
     sharedFrom,
     sharedTo,
+    // Rendering gates are part of the request context. A response started
+    // for the local/authenticated view must not commit after the dashboard
+    // switches to guest, mock, or a still-resolving cloud scope.
+    guestAllowed,
+    mockEnabled,
+    cacheAllowed,
+    accountViewResolving,
+    tokenReady,
+    isLocalMode,
   ]);
 
   // Wipe state when the scope flips so the previously-rendered local data

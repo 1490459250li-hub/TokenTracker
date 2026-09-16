@@ -226,6 +226,88 @@ describe("UsageLimitsPanel", () => {
     expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
   });
 
+  it("renders Command Code 5h / Weekly windows with the plan tier", () => {
+    render(
+      <UsageLimitsPanel
+        commandCode={{
+          configured: true,
+          error: null,
+          plan_label: "GOAT",
+          primary_window: {
+            used_percent: 32,
+            reset_at: "2026-09-06T20:00:00.000Z",
+          },
+          secondary_window: {
+            used_percent: 41,
+            reset_at: "2026-09-13T00:00:00.000Z",
+          },
+        }}
+        order={["commandCode"]}
+      />,
+    );
+
+    expect(screen.getByText("Command Code GOAT")).toBeInTheDocument();
+    expect(screen.getByText("5h")).toBeInTheDocument();
+    expect(screen.getByText("Weekly")).toBeInTheDocument();
+    expect(screen.getByText("32%")).toBeInTheDocument();
+    expect(screen.getByText("41%")).toBeInTheDocument();
+  });
+
+  it("shows the two-option Command Code setup hint when not connected", () => {
+    render(
+      <UsageLimitsPanel commandCode={{ configured: false }} order={["commandCode"]} />,
+    );
+
+    expect(screen.getByText("Command Code")).toBeInTheDocument();
+    expect(screen.getByText("Not connected")).toBeInTheDocument();
+    expect(screen.getByText("Connect Command Code")).toBeInTheDocument();
+    expect(screen.getByText("cmd login")).toBeInTheDocument();
+    expect(screen.getByText(/COMMAND_CODE_API_KEY/)).toBeInTheDocument();
+  });
+
+  it("copies the Command Code API-key snippet without sending the key anywhere", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+
+    render(<UsageLimitsPanel commandCode={{ configured: false }} order={["commandCode"]} />);
+
+    await fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    await vi.waitFor(() => {
+      expect(writeText).toHaveBeenCalledTimes(1);
+    });
+    const snippet = writeText.mock.calls[0][0];
+    // The snippet reads the key interactively (`read -r -s`) so it never lands
+    // in shell history, then exports it for both the shell profile path and
+    // the macOS app (launchctl) path. It is a template only: no real key.
+    expect(snippet).toContain("read -r -s COMMAND_CODE_API_KEY");
+    expect(snippet).toContain("export COMMAND_CODE_API_KEY");
+    expect(snippet).toContain('launchctl setenv COMMAND_CODE_API_KEY "$COMMAND_CODE_API_KEY"');
+    expect(snippet).not.toMatch(/sk-/);
+    expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+  });
+
+  it("uses Command Code's Windows binary and PowerShell setup", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", clipboard: { writeText } });
+    render(<UsageLimitsPanel commandCode={{ configured: false }} order={["commandCode"]} />);
+    expect(screen.getByText("cmdc auth login")).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    expect(writeText.mock.calls[0][0]).toContain("Read-Host -AsSecureString\n");
+    expect(writeText.mock.calls[0][0]).toContain("SetEnvironmentVariable");
+    expect(writeText.mock.calls[0][0]).not.toMatch(/launchctl|read -r/);
+  });
+
+  it("omits macOS launchctl from the Command Code Linux setup", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (X11; Linux x86_64)", clipboard: { writeText } });
+    render(<UsageLimitsPanel commandCode={{ configured: false }} order={["commandCode"]} />);
+    expect(screen.getByText("cmd login")).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    expect(writeText.mock.calls[0][0]).toContain("export COMMAND_CODE_API_KEY");
+    expect(writeText.mock.calls[0][0]).not.toContain("launchctl");
+  });
+
   it("does not describe a pace marker when the provider cannot render one (issue 445)", () => {
     render(
       <UsageLimitsPanel
@@ -260,6 +342,11 @@ describe("UsageLimitsPanel", () => {
             reset_at: "2026-09-04T03:32:21.000Z",
             limit_window_seconds: 31 * 24 * 60 * 60,
           },
+          quaternary_window: {
+            used_percent: 0,
+            reset_at: "2026-08-31T10:37:44.547Z",
+            limit_window_seconds: 407741,
+          },
         }}
         order={["cursor"]}
       />,
@@ -267,6 +354,8 @@ describe("UsageLimitsPanel", () => {
 
     const group = screen.getByText("Cursor").closest("[role='button']");
     expect(group).not.toBeNull();
+    expect(within(group).getByText(copy("limits.label.cursor_grok_bot"))).toBeInTheDocument();
+    expect(within(group).getByText("0%")).toBeInTheDocument();
     expect(group.querySelectorAll("div.absolute.top-0.h-full")).toHaveLength(2);
     fireEvent.click(group);
     expect(within(group).getByText(copy("limits.explain.body"))).toBeInTheDocument();
@@ -497,6 +586,28 @@ describe("UsageLimitsPanel", () => {
     expect(within(group).queryByText(/^Stale/i)).not.toBeInTheDocument();
   });
 
+  it("flags Antigravity reauth ahead of the cached badge", () => {
+    render(
+      <UsageLimitsPanel
+        antigravity={{
+          configured: true,
+          error: null,
+          cached: true,
+          cached_at: "2026-07-17T12:00:00.000Z",
+          auth_action_required: "reauth",
+          primary_window: { used_percent: 24, reset_at: "2026-07-24T12:00:00.000Z" },
+        }}
+        order={["antigravity"]}
+      />,
+    );
+
+    const group = screen.getByText("Antigravity").closest("[role='button']");
+    expect(group).not.toBeNull();
+    expect(within(group).getByText(new RegExp(copy("limits.reauth.badge")))).toBeInTheDocument();
+    expect(within(group).getByText(/run `agy`/)).toBeInTheDocument();
+    expect(within(group).queryByText(/cached/i)).not.toBeInTheDocument();
+  });
+
   it("flags an expired Claude sign-in on cached bars instead of the generic stale badge", () => {
     render(
       <UsageLimitsPanel
@@ -521,6 +632,34 @@ describe("UsageLimitsPanel", () => {
     const group = screen.getByText("Claude").closest("[role='button']");
     expect(group).not.toBeNull();
     expect(within(group).getByText(new RegExp(copy("limits.reauth.badge")))).toBeInTheDocument();
+    expect(within(group).queryByText(/^Stale/i)).not.toBeInTheDocument();
+  });
+
+  it("sources the Command Code reauth command from the copy registry into the tooltip (review 594)", () => {
+    render(
+      <UsageLimitsPanel
+        commandCode={{
+          configured: true,
+          error: null,
+          primary_window: { used_percent: 41, reset_at: "2026-07-24T12:00:00.000Z" },
+          stale: true,
+          cached_at: "2026-07-17T12:00:00.000Z",
+          auth_action_required: "reauth",
+          provenance: {
+            source: "disk-cache",
+            confidence: "observed",
+            stale: true,
+            captured_at: "2026-07-17T12:00:00.000Z",
+          },
+        }}
+        order={["commandCode"]}
+      />,
+    );
+
+    const group = screen.getByText("Command Code").closest("[role='button']");
+    expect(group).not.toBeNull();
+    expect(within(group).getByText(new RegExp(copy("limits.reauth.badge")))).toBeInTheDocument();
+    expect(within(group).getByText(/run `cmd login`/)).toBeInTheDocument();
     expect(within(group).queryByText(/^Stale/i)).not.toBeInTheDocument();
   });
 
@@ -567,12 +706,6 @@ describe("UsageLimitsPanel", () => {
   });
 
   it("renders Codex credit usage from spend controls", () => {
-    function expectLimitRow(label, value) {
-      const row = screen.getByText(label).closest("div");
-      expect(row).not.toBeNull();
-      expect(within(row).getByText(value)).toBeInTheDocument();
-    }
-
     render(
       <UsageLimitsPanel
         codex={{
@@ -694,5 +827,140 @@ describe("UsageLimitsPanel", () => {
     expect(codexGroupElement.querySelector("[data-reset-bank-section]")).toBeNull();
     expect(within(codexGroupElement).queryByText(copy("limits.codex_reset_bank.title"))).not.toBeInTheDocument();
     expect(within(codexGroupElement).queryByText(copy("limits.codex_reset_bank.row_label", { index: 1 }))).not.toBeInTheDocument();
+  });
+
+  it("renders an inline subscription bar, badge and detail for a linked provider", () => {
+    const subscription = {
+      id: "s1",
+      service: "Cursor",
+      plan: "Pro",
+      provider: "cursor",
+      autoRenew: true,
+      nextBillingAt: new Date(Date.now() + 2 * 86400000).toISOString(),
+    };
+
+    render(
+      <UsageLimitsPanel
+        cursor={{
+          configured: true,
+          error: null,
+          primary_window: { used_percent: 50, reset_at: "2026-05-10T10:39:54.000Z" },
+        }}
+        order={["cursor"]}
+        subscriptions={[subscription]}
+      />,
+    );
+
+    expect(screen.getByText("Cursor")).toBeInTheDocument();
+    // Collapsed: top-right auto-renew icon badge and the "Subscription" bar label.
+    expect(screen.getByRole("img", { name: "Auto-renew" })).toBeInTheDocument();
+    expect(screen.getByText("Subscription")).toBeInTheDocument();
+
+    // Expanding reveals the subscription detail line.
+    fireEvent.click(screen.getByText("Cursor").closest("[role='button']"));
+    expect(screen.getByText("Next renewal")).toBeInTheDocument();
+    expect(screen.getByText("Auto-renew on")).toBeInTheDocument();
+  });
+
+  it("does not render subscription rows for a provider without a linked subscription", () => {
+    render(
+      <UsageLimitsPanel
+        cursor={{
+          configured: true,
+          error: null,
+          primary_window: { used_percent: 50, reset_at: "2026-05-10T10:39:54.000Z" },
+        }}
+        order={["cursor"]}
+        subscriptions={[]}
+      />,
+    );
+
+    expect(screen.getByText("Cursor")).toBeInTheDocument();
+    expect(screen.queryByText("Auto-renew")).not.toBeInTheDocument();
+    expect(screen.queryByText("Subscription")).not.toBeInTheDocument();
+  });
+
+  it("renders Devin Daily / Weekly windows with the plan label", () => {
+    render(
+      <UsageLimitsPanel
+        devin={{
+          configured: true,
+          error: null,
+          plan_label: "Pro",
+          primary_window: {
+            used_percent: 40,
+            reset_at: "2026-09-13T08:00:00.000Z",
+            limit_window_seconds: 86400,
+          },
+          secondary_window: {
+            used_percent: 90,
+            reset_at: "2026-09-20T08:00:00.000Z",
+            limit_window_seconds: 604800,
+          },
+        }}
+        order={["devin"]}
+      />,
+    );
+
+    expect(screen.getByText("Devin Pro")).toBeInTheDocument();
+    expect(screen.getByText("Daily")).toBeInTheDocument();
+    expect(screen.getByText("Weekly")).toBeInTheDocument();
+    expect(screen.getByText("40%")).toBeInTheDocument();
+    expect(screen.getByText("90%")).toBeInTheDocument();
+  });
+
+  it("flips Devin percentages to remaining in remaining display mode", () => {
+    render(
+      <UsageLimitsPanel
+        devin={{
+          configured: true,
+          error: null,
+          primary_window: {
+            used_percent: 40,
+            reset_at: "2026-09-13T08:00:00.000Z",
+            limit_window_seconds: 86400,
+          },
+        }}
+        order={["devin"]}
+        displayMode="remaining"
+      />,
+    );
+
+    expect(screen.getByText("60%")).toBeInTheDocument();
+    expect(screen.queryByText("40%")).not.toBeInTheDocument();
+  });
+
+  it("renders no bogus Daily bar when Devin reports only the weekly window", () => {
+    render(
+      <UsageLimitsPanel
+        devin={{
+          configured: true,
+          error: null,
+          primary_window: null,
+          secondary_window: {
+            used_percent: 25,
+            reset_at: "2026-09-20T08:00:00.000Z",
+            limit_window_seconds: 604800,
+          },
+        }}
+        order={["devin"]}
+      />,
+    );
+
+    expect(screen.getByText("Devin")).toBeInTheDocument();
+    expect(screen.getByText("Weekly")).toBeInTheDocument();
+    expect(screen.getByText("25%")).toBeInTheDocument();
+    expect(screen.queryByText("Daily")).not.toBeInTheDocument();
+  });
+
+  it("shows the Devin CLI setup hint when not connected", () => {
+    render(
+      <UsageLimitsPanel devin={{ configured: false }} order={["devin"]} />,
+    );
+
+    expect(screen.getByText("Devin")).toBeInTheDocument();
+    expect(screen.getByText("Not connected")).toBeInTheDocument();
+    expect(screen.getByText("Connect Devin")).toBeInTheDocument();
+    expect(screen.getByText("devin auth login")).toBeInTheDocument();
   });
 });

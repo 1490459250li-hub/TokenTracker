@@ -31,6 +31,8 @@
  */
 import { createClient } from "npm:@insforge/sdk";
 
+const SOURCES_WITH_AUTHORITATIVE_COST = new Set(["grok"]);
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -168,12 +170,17 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cache_read:
   "gpt-5.4-pro": { input: 30, output: 180, cache_read: 3 },
   "gpt-5.5": { input: 5, output: 30, cache_read: 0.5 },
   // GPT-5.6 family (public 2026-07-09), developers.openai.com/api/docs/pricing.
-  // Three durable capability tiers: sol (flagship) / terra (balanced default) /
+  // Three durable capability tiers: sol (flagship and public alias) / terra (balanced) /
   // luna (lightweight). Codex reports the tier in the model id (gpt-5.6-sol,
   // + reasoning-effort variants like gpt-5.6-solhigh). Not yet in LiteLLM.
-  "gpt-5.6-sol": { input: 5, output: 30, cache_read: 0.5, cache_write: 6.25 },
+  "gpt-5.6-sol": { input: 4, output: 20, cache_read: 0.4, cache_write: 5 },
   "gpt-5.6-terra": { input: 2, output: 12, cache_read: 0.2, cache_write: 2.5 },
   "gpt-5.6-luna": { input: 0.2, output: 1.2, cache_read: 0.02, cache_write: 0.25 },
+  // GPT-6 Astra Standard USD/MTok, verified 2026-09-07:
+  // https://developers.openai.com/api/docs/models/gpt-6-astra
+  // Cloud buckets do not retain per-request context/service tier. Use the
+  // standard short-context estimate; never infer long context from totals.
+  "gpt-6-astra": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
   "gpt-5-mini": { input: 0.25, output: 2, cache_read: 0.025 },
   "o3": { input: 2, output: 8, cache_read: 0.5 },
   // ── Google Gemini ──
@@ -206,6 +213,10 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cache_read:
   //    matcher requires the user-supplied model name to CONTAIN the LiteLLM
   //    key, so the bare `glm-5.1` / `glm-4.6` strings reported by Claude
   //    Code-compatible GLM endpoints never match. Curate them here. ──
+  // GLM-5.3: flagship keeps the 5.2 list rate; Flash is a distinct cheap SKU
+  // (LiteLLM `zai/glm-5.3-flash`: $0.15/$0.50/$0.03 per MTok in/out/cache-read).
+  "glm-5.3": { input: 1.4, output: 4.4, cache_read: 0.26 },
+  "glm-5.3-flash": { input: 0.15, output: 0.5, cache_read: 0.03 },
   "glm-5.2": { input: 1.4, output: 4.4, cache_read: 0.26 },
   "glm-5.1": { input: 1.4, output: 4.4, cache_read: 0.26 },
   "glm-5": { input: 1.0, output: 3.2, cache_read: 0.2 },
@@ -287,9 +298,89 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cache_read:
   "step-3.5-flash": { input: 0.1, output: 0.3, cache_read: 0.02, cache_write: 0.1 },
 };
 const ZERO_PRICING = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+// iFlytek MaaS prices used by the AStudio source: RMB per million tokens,
+// converted at 7.2 RMB/USD and rounded to two decimal places. Models without a cache-hit
+// price use the regular input price; cache writes use the regular input price as well.
+// AStudio homepage: https://agent.xfyun.cn/
+// Official pricing source: https://maas.xfyun.cn/modelSquare
+const IFLYTEK_MAAS_MODEL_PRICING: Record<string, { input: number; output: number; cache_read: number; cache_write?: number }> = {
+  "xopglm53": { input: 1.11, output: 3.89, cache_read: 0.28, cache_write: 1.11 },
+  "xopdeepseekv4pro0813": { input: 1.25, output: 3.75, cache_read: 0.04, cache_write: 1.25 },
+  "xopdeepseekv4flash0731": { input: 0.14, output: 0.28, cache_read: 0.03, cache_write: 0.14 },
+  "xopkimik27code": { input: 0.90, output: 3.75, cache_read: 0.90, cache_write: 0.90 },
+  "xopglm52": { input: 1.11, output: 3.89, cache_read: 0.28, cache_write: 1.11 },
+  "xopdeepseekv4flash": { input: 0.14, output: 0.28, cache_read: 0.03, cache_write: 0.14 },
+  "xopkimik26": { input: 0.90, output: 3.75, cache_read: 0.18, cache_write: 0.90 },
+  "xopdeepseekv4pro": { input: 1.67, output: 3.33, cache_read: 0.14, cache_write: 1.67 },
+  "xopqwen36v35b": { input: 0.15, output: 0.90, cache_read: 0.15, cache_write: 0.15 },
+  "xophunyuan7bmt": { input: 0.07, output: 0.28, cache_read: 0.07, cache_write: 0.07 },
+  "xoppaddleocrv16": { input: 0.00, output: 0.00, cache_read: 0.00, cache_write: 0.00 },
+  "xsparkx2flash": { input: 0.14, output: 0.28, cache_read: 0.14, cache_write: 0.14 },
+  "xopglm51": { input: 1.11, output: 3.89, cache_read: 0.22, cache_write: 1.11 },
+  "xsparkx2": { input: 0.42, output: 0.42, cache_read: 0.42, cache_write: 0.42 },
+  "xop35qwen2b": { input: 0.03, output: 0.06, cache_read: 0.03, cache_write: 0.03 },
+  "xopqwen35397b": { input: 0.17, output: 1.00, cache_read: 0.17, cache_write: 0.17 },
+  "xminimaxm25": { input: 0.29, output: 1.17, cache_read: 0.29, cache_write: 0.29 },
+  "xopglm5": { input: 0.83, output: 3.06, cache_read: 0.17, cache_write: 0.83 },
+  "xopkimik25": { input: 0.56, output: 2.92, cache_read: 0.56, cache_write: 0.56 },
+  "xopdeepseekv32": { input: 0.14, output: 0.21, cache_read: 0.14, cache_write: 0.14 },
+  "xop3qwencodernext": { input: 0.35, output: 1.39, cache_read: 0.35, cache_write: 0.35 },
+  "xopglmv47flash": { input: 0.14, output: 0.21, cache_read: 0.14, cache_write: 0.14 },
+  "xopglm47blth2": { input: 0.56, output: 2.22, cache_read: 0.56, cache_write: 0.56 },
+  "xop3qwen32bvl": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "xopdeepseekocr": { input: 0.00, output: 0.00, cache_read: 0.00, cache_write: 0.00 },
+  "xophunyuanocr": { input: 0.00, output: 0.00, cache_read: 0.00, cache_write: 0.00 },
+  "xop3qwen80bnext": { input: 0.08, output: 0.33, cache_read: 0.08, cache_write: 0.08 },
+  "xop3qwen235b2507": { input: 0.17, output: 1.67, cache_read: 0.17, cache_write: 0.17 },
+  "xop3qwen30b2507": { input: 0.06, output: 0.63, cache_read: 0.06, cache_write: 0.06 },
+  "xop3qwen235b": { input: 0.17, output: 1.67, cache_read: 0.17, cache_write: 0.17 },
+  "xop3qwen30b": { input: 0.06, output: 0.63, cache_read: 0.06, cache_write: 0.06 },
+  "xop3qwen32b": { input: 0.17, output: 1.67, cache_read: 0.17, cache_write: 0.17 },
+  "xdeepseekv3": { input: 0.22, output: 0.89, cache_read: 0.22, cache_write: 0.22 },
+  "xdeepseekr1": { input: 0.44, output: 1.78, cache_read: 0.44, cache_write: 0.44 },
+  "xdeepseekr1qwen32b": { input: 0.22, output: 0.67, cache_read: 0.22, cache_write: 0.22 },
+  "xopkimik2blth": { input: 0.56, output: 2.22, cache_read: 0.56, cache_write: 0.56 },
+  "xopkimik2blins": { input: 0.56, output: 2.22, cache_read: 0.56, cache_write: 0.56 },
+  "xop3qwen8breranker": { input: 0.00, output: 0.00, cache_read: 0.00, cache_write: 0.00 },
+  "xop3qwen8bembedding": { input: 0.00, output: 0.00, cache_read: 0.00, cache_write: 0.00 },
+  "xop3qwen0b6": { input: 0.04, output: 0.42, cache_read: 0.04, cache_write: 0.04 },
+  "xop3qwen4b": { input: 0.04, output: 0.42, cache_read: 0.04, cache_write: 0.04 },
+  "xqwen257bchat": { input: 0.07, output: 0.14, cache_read: 0.07, cache_write: 0.07 },
+  "xop3qwen14b": { input: 0.14, output: 1.39, cache_read: 0.14, cache_write: 0.14 },
+  "xop3qwen8b": { input: 0.07, output: 0.69, cache_read: 0.07, cache_write: 0.07 },
+  "xsparkprox": { input: 1.11, output: 5.56, cache_read: 1.11, cache_write: 1.11 },
+  "xspark13b6k": { input: 0.28, output: 0.83, cache_read: 0.28, cache_write: 0.28 },
+  "spark mini": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "spark mini instruct": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "spark tiny": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "internlm2.5_7b_chat": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "internlm2.5_1.8b_chat": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_7b_base": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "xsqwen2d53b": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_3b_base": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_1.5b_instruct": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_1.5b_base": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_0.5b_instruct": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "qwen_v2.5_0.5b_base": { input: 0.28, output: 1.11, cache_read: 0.28, cache_write: 0.28 },
+  "xsqwenv2s1b5c": { input: 0.14, output: 0.28, cache_read: 0.14, cache_write: 0.14 },
+  "xsqwenv2s0b5c": { input: 0.28, output: 0.56, cache_read: 0.28, cache_write: 0.28 },
+  "xqwen14bchat": { input: 0.28, output: 0.83, cache_read: 0.28, cache_write: 0.28 },
+};
+function normalizeIFlytekMaasModel(model: string) {
+  const lower = model.trim().toLowerCase();
+  if (lower === "xsparkx2agent") return "xsparkx2";
+  return lower;
+}
 
-function getModelPricing(model: string) {
+function getModelPricing(model: string, source = "") {
   if (!model) return ZERO_PRICING;
+  if (source.toLowerCase() === "acode") {
+    const normalized = normalizeIFlytekMaasModel(model);
+    // Undisclosed routing must not inherit generic aliases or fuzzy prices.
+    if (normalized === "auto" || normalized.endsWith("-auto")) return ZERO_PRICING;
+    const iFlytekMaasPricing = IFLYTEK_MAAS_MODEL_PRICING[normalized];
+    if (iFlytekMaasPricing) return iFlytekMaasPricing;
+  }
   const exact = MODEL_PRICING[model];
   if (exact) return exact;
   const lower = model.toLowerCase();
@@ -301,13 +392,14 @@ function getModelPricing(model: string) {
   if (lower.includes("opus")) return MODEL_PRICING["claude-opus-4-6"];
   if (lower.includes("haiku")) return MODEL_PRICING["claude-haiku-4-5-20251001"];
   if (lower.includes("sonnet")) return MODEL_PRICING["claude-sonnet-4-6"];
+  if (lower.includes("gpt-6-astra")) return MODEL_PRICING["gpt-6-astra"];
   // gpt-5.6 tiers: sol/terra/luna carry reasoning-effort suffixes (solhigh,
   // etc.), so match by substring. Specific tiers precede the generic gpt-5.6
-  // fallback (which defaults to the balanced terra tier).
+  // fallback (the public gpt-5.6 alias points to the flagship sol tier).
   if (lower.includes("gpt-5.6-sol")) return MODEL_PRICING["gpt-5.6-sol"];
   if (lower.includes("gpt-5.6-terra")) return MODEL_PRICING["gpt-5.6-terra"];
   if (lower.includes("gpt-5.6-luna")) return MODEL_PRICING["gpt-5.6-luna"];
-  if (lower.includes("gpt-5.6")) return MODEL_PRICING["gpt-5.6-terra"];
+  if (lower.includes("gpt-5.6")) return MODEL_PRICING["gpt-5.6-sol"];
   if (lower.includes("gpt-5.4-pro")) return MODEL_PRICING["gpt-5.4-pro"];
   if (lower.includes("gpt-5.4")) return MODEL_PRICING["gpt-5.4"];
   if (lower.includes("gpt-5.5")) return MODEL_PRICING["gpt-5.5"];
@@ -367,6 +459,8 @@ function getModelPricing(model: string) {
   if (lower.includes("glm-4.7-flash")) return MODEL_PRICING["glm-4.7-flash"];
   if (lower.includes("glm-4.7")) return MODEL_PRICING["glm-4.7"];
   if (lower.includes("glm-4.6")) return MODEL_PRICING["glm-4.6"];
+  if (lower.includes("glm-5.3-flash")) return MODEL_PRICING["glm-5.3-flash"];
+  if (lower.includes("glm-5.3")) return MODEL_PRICING["glm-5.3"];
   if (lower.includes("glm-5-turbo")) return MODEL_PRICING["glm-5-turbo"];
   if (lower.includes("glm-5.2")) return MODEL_PRICING["glm-5.2"];
   if (lower.includes("glm-5.1")) return MODEL_PRICING["glm-5.1"];
@@ -385,8 +479,9 @@ function getModelPricing(model: string) {
   return ZERO_PRICING;
 }
 
-function getRowPricing(row: { model?: string; hour_start?: string; pricing_tier?: string }) {
-  const pricing = getModelPricing(row.model || "");
+function getRowPricing(row: { model?: string; source?: string; hour_start?: string; pricing_tier?: string }) {
+  const pricing = getModelPricing(row.model || "", row.source);
+  if ((row.source || "").toLowerCase() === "acode") return pricing;
   const lower = String(row.model || "").toLowerCase();
   if (!lower.includes("deepseek-v4-flash") && !lower.includes("deepseek-v4-pro")) return pricing;
   let offPeak = row.pricing_tier === "off_peak";
@@ -435,6 +530,7 @@ interface GroupedRow {
   cached_input_tokens: number | null;
   cache_creation_input_tokens: number | null;
   reasoning_output_tokens: number | null;
+  total_cost_usd?: number | null;
   conversations: number | null;
   pricing_tier?: string;
 }
@@ -497,23 +593,36 @@ async function fetchGroupedRows(
 }
 
 function computeRowCost(row: GroupedRow): number {
+  // LM Studio developer-server and LM Link traffic is local inference. Its
+  // logs do not represent Bionic Secure Cloud billing.
+  if (row.source === "lmstudio") return 0;
   // Pi's GitHub Copilot provider is subscription-backed. Keep its token
   // counts, but do not reprice the recorded Claude model as Anthropic API use.
   if (row.source === "pi-github-copilot" || row.source === "pi-copilot") return 0;
+  const reportedCost = Number(row.total_cost_usd);
+  if (
+    SOURCES_WITH_AUTHORITATIVE_COST.has(row.source) &&
+    Number.isFinite(reportedCost) &&
+    reportedCost > 0
+  ) return reportedCost;
   // WorkBuddy's auto-router logs model="auto"; price it as its default Hunyuan
   // model (hy3-preview-agent) so it isn't billed as Cursor's composer-1. Mirrors
   // normalizeWorkbuddyModel in src/lib/pricing/matcher.js.
-  const modelForPricing =
-    row.source === "workbuddy" && (row.model || "").toLowerCase() === "auto"
+  const rawModel = String(row.model || "").trim();
+  const unslothUnpriced =
+    row.source === "unsloth" && /^(local|unpriced)\//i.test(rawModel);
+  const modelForPricing = unslothUnpriced
+    ? "__tokentracker_unpriced_unsloth_model__"
+    : row.source === "workbuddy" && rawModel.toLowerCase() === "auto"
       ? "hy3-preview-agent"
-      : row.model;
+      : rawModel;
   const p = getRowPricing({ ...row, model: modelForPricing });
   // Codex / every-code fold reasoning into output_tokens (OpenAI convention),
   // so charging reasoning_output_tokens again at the output rate double-counts.
   // Must stay in lockstep with src/lib/pricing/index.js:computeRowCost and
   // tokentracker-leaderboard-refresh.ts (both guard on source).
   const reasoningCost =
-    row.source === "codex" || row.source === "every-code"
+    row.source === "codex" || row.source === "acode" || row.source === "every-code"
       ? 0
       : (Number(row.reasoning_output_tokens) || 0) * (p.output || 0);
   return (

@@ -11,6 +11,7 @@ const {
   resolveRuntimeConfig,
   isLegacyInsforgeBaseUrl,
   DEFAULT_BASE_URL,
+  DEFAULT_ANON_KEY,
 } = require("../src/lib/runtime-config");
 
 const LEGACY_BASE_URL = "https://b46ug8xu.us-east.insforge.app";
@@ -28,6 +29,7 @@ async function withTempHome(fn) {
     TOKENTRACKER_DSH_HOME: process.env.TOKENTRACKER_DSH_HOME,
     TOKENTRACKER_DEVICE_TOKEN: process.env.TOKENTRACKER_DEVICE_TOKEN,
     TOKENTRACKER_INSFORGE_BASE_URL: process.env.TOKENTRACKER_INSFORGE_BASE_URL,
+    TOKENTRACKER_INSFORGE_ANON_KEY: process.env.TOKENTRACKER_INSFORGE_ANON_KEY,
     TOKENTRACKER_SKIP_FIRST_SYNC: process.env.TOKENTRACKER_SKIP_FIRST_SYNC,
   };
   try {
@@ -38,6 +40,7 @@ async function withTempHome(fn) {
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
     delete process.env.TOKENTRACKER_DEVICE_TOKEN;
     delete process.env.TOKENTRACKER_INSFORGE_BASE_URL;
+    delete process.env.TOKENTRACKER_INSFORGE_ANON_KEY;
     delete process.env.DSH_HOME;
     delete process.env.TOKENTRACKER_DSH_HOME;
     return await fn(home);
@@ -175,6 +178,7 @@ test("sync preserves the legacy device token and replays the queue to the curren
       config: {
         installedAt: "2026-03-23T08:16:55.409Z",
         baseUrl: LEGACY_BASE_URL,
+        anonKey: "legacy-anon-key",
         deviceToken: "legacy-token",
         deviceId: "legacy-device",
         user_id: "legacy-user",
@@ -200,6 +204,7 @@ test("sync preserves the legacy device token and replays the queue to the curren
 
     const config = await readJsonFile(path.join(trackerDir, "config.json"));
     assert.equal(config.baseUrl, undefined);
+    assert.equal(config.anonKey, undefined);
     assert.equal(config.deviceToken, "legacy-token");
     assert.equal(config.deviceId, "legacy-device");
     assert.equal(config.user_id, "legacy-user");
@@ -217,6 +222,7 @@ test("sync preserves the legacy device token and replays the queue to the curren
 
     assert.equal(ingestCalls.length, 1);
     assert.equal(ingestCalls[0].url, `${DEFAULT_BASE_URL}/functions/tokentracker-ingest`);
+    assert.equal(ingestCalls[0].options.headers.apikey, DEFAULT_ANON_KEY);
     assert.equal(ingestCalls[0].options.headers.Authorization, "Bearer legacy-token");
     assert.deepEqual(JSON.parse(ingestCalls[0].options.body).hourly, [JSON.parse(queue)]);
 
@@ -224,17 +230,160 @@ test("sync preserves the legacy device token and replays the queue to the curren
     assert.equal(uploadThrottle.backoffStep, 0);
     assert.equal(uploadThrottle.lastError, null);
 
-    // Second run must not reset again: the guard no longer matches.
+    // Second run must not reset again, and a newly pending row must upload
+    // with the current runtime key after the legacy config key was removed.
+    const pendingRow = {
+      ...JSON.parse(queue),
+      hour_start: "2026-04-20T00:30:00.000Z",
+      model: "gpt-5.4-follow-up",
+    };
+    const pendingLine = `${JSON.stringify(pendingRow)}\n`;
+    await fs.appendFile(path.join(trackerDir, "queue.jsonl"), pendingLine, "utf8");
     await fs.writeFile(
       path.join(trackerDir, "queue.state.json"),
-      JSON.stringify({ offset: 777, updatedAt: new Date().toISOString(), note: "manual" }),
+      JSON.stringify({
+        offset: Buffer.byteLength(queue),
+        updatedAt: new Date().toISOString(),
+        note: "manual",
+      }),
       "utf8",
     );
     await cmdSync(["--auto"]);
     const after = await readJsonFile(path.join(trackerDir, "queue.state.json"));
-    assert.equal(after.offset, 777);
+    assert.equal(after.offset, Buffer.byteLength(queue) + Buffer.byteLength(pendingLine));
     assert.equal(after.note, "manual");
-    assert.equal(ingestCalls.length, 1);
+    assert.equal(ingestCalls.length, 2);
+    assert.equal(ingestCalls[1].options.headers.apikey, DEFAULT_ANON_KEY);
+    assert.equal(ingestCalls[1].options.headers.Authorization, "Bearer legacy-token");
+    assert.deepEqual(JSON.parse(ingestCalls[1].options.body).hourly, [pendingRow]);
+  });
+});
+
+test("sync preserves an anon key replaced while legacy migration is uploading", async () => {
+  await withTempHome(async (home) => {
+    const trackerDir = await writeTrackerState(home, {});
+    await cmdSync(["--auto"]);
+
+    const queue = sampleQueueLine();
+    const configPath = path.join(trackerDir, "config.json");
+    await writeTrackerState(home, {
+      config: {
+        baseUrl: LEGACY_BASE_URL,
+        anonKey: "legacy-anon-key",
+        deviceToken: "legacy-token",
+        machineId: "machine-1",
+      },
+      queue,
+      queueState: { offset: Buffer.byteLength(queue) },
+    });
+
+    global.fetch = async (url) => {
+      if (String(url).endsWith("/functions/tokentracker-ingest")) {
+        await fs.writeFile(
+          configPath,
+          JSON.stringify({
+            baseUrl: LEGACY_BASE_URL,
+            anonKey: "current-anon-key",
+            deviceToken: "legacy-token",
+            machineId: "machine-1",
+          }),
+          "utf8",
+        );
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ inserted: 1, skipped: 0 }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () => "{}",
+        json: async () => ({}),
+      };
+    };
+
+    await cmdSync(["--auto"]);
+
+    const config = await readJsonFile(configPath);
+    assert.equal(config.baseUrl, undefined);
+    assert.equal(config.anonKey, "current-anon-key");
+    assert.equal(config.deviceToken, "legacy-token");
+  });
+});
+
+test("sync removes an unchanged legacy anon key after a concurrent login updates the base URL", async () => {
+  await withTempHome(async (home) => {
+    const trackerDir = await writeTrackerState(home, {});
+    await cmdSync(["--auto"]);
+
+    const queue = sampleQueueLine();
+    const configPath = path.join(trackerDir, "config.json");
+    await writeTrackerState(home, {
+      config: {
+        baseUrl: LEGACY_BASE_URL,
+        anonKey: "legacy-anon-key",
+        deviceToken: "legacy-token",
+        machineId: "machine-1",
+      },
+      queue,
+      queueState: { offset: Buffer.byteLength(queue) },
+    });
+
+    const ingestCalls = [];
+    global.fetch = async (url, options = {}) => {
+      if (String(url).endsWith("/functions/tokentracker-ingest")) {
+        ingestCalls.push(options);
+        if (ingestCalls.length === 1) {
+          await fs.writeFile(
+            configPath,
+            JSON.stringify({
+              baseUrl: DEFAULT_BASE_URL,
+              anonKey: "legacy-anon-key",
+              deviceToken: "current-login-token",
+              user_id: "current-user",
+              machineId: "machine-1",
+            }),
+            "utf8",
+          );
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ inserted: 1, skipped: 0 }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () => "{}",
+        json: async () => ({}),
+      };
+    };
+
+    await cmdSync(["--auto"]);
+    const config = await readJsonFile(configPath);
+    assert.equal(config.baseUrl, DEFAULT_BASE_URL);
+    assert.equal(config.anonKey, undefined);
+    assert.equal(config.deviceToken, "current-login-token");
+    assert.equal(config.user_id, "current-user");
+
+    const pendingRow = {
+      ...JSON.parse(queue),
+      hour_start: "2026-04-20T00:30:00.000Z",
+      model: "gpt-5.4-after-login",
+    };
+    const pendingLine = `${JSON.stringify(pendingRow)}\n`;
+    await fs.appendFile(path.join(trackerDir, "queue.jsonl"), pendingLine, "utf8");
+    await cmdSync(["--auto"]);
+
+    assert.equal(ingestCalls.length, 2);
+    assert.equal(ingestCalls[1].headers.apikey, DEFAULT_ANON_KEY);
+    assert.equal(ingestCalls[1].headers.Authorization, "Bearer current-login-token");
   });
 });
 

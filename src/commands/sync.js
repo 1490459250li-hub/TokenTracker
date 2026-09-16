@@ -15,6 +15,7 @@ const {
   chmod600IfPossible,
   openLock,
   inspectLock,
+  updateJsonLocked,
 } = require("../lib/fs");
 const { physicalJsonlRecords } = require("../lib/jsonl-lines");
 const {
@@ -26,11 +27,17 @@ const {
   listGeminiSessionFiles,
   listOpencodeMessageFiles,
   readOpencodeDbMessages,
+  readOpencodeDbMessagesIncremental,
   readMimoDbMessages,
   readZcodeDbMessages,
+  hasZcodeNativeUsageSchema,
   resolveQoderDbPaths,
   resolveQoderCnDbPaths,
   readQoderDbMessages,
+  resolveQoderProjectsDir,
+  resolveQoderCnProjectsDir,
+  listQoderNewSessionFiles,
+  parseQoderNewIncremental,
   resolveKiroDbPath,
   resolveKiroJsonlPath,
   resolveKiroBasePath,
@@ -106,8 +113,14 @@ const {
   parseRoocodeIncremental,
   resolveZedDbPath,
   parseZedIncremental,
+  resolveLmstudioLogFiles,
+  parseLmstudioIncremental,
+  resolveUnslothDbPath,
+  parseUnslothIncremental,
   resolveAnythingllmDbPath,
   parseAnythingllmIncremental,
+  resolveDevinDbPath,
+  parseDevinIncremental,
   resolveGooseDbPath,
   parseGooseIncremental,
   listDroidSettingsFiles,
@@ -261,6 +274,8 @@ const CODEX_COLD_SCAN_AUDIT_MAX_SYNCS = 288;
 // state so the next sync (providerID-filtered reader) rebuilds it correctly.
 const MIMO_PROVIDER_REPAIR_KEY = "mimoClaudeMislabelRepair_2026_06";
 const DSH_LEGACY_SOURCE_MIGRATION_KEY = "deepseekHarnessSourceMigration_2026_08";
+const ZCODE_NATIVE_USAGE_REPAIR_KEY = "zcodeNativeUsageRepair_2026_08";
+const ZCODE_INCLUSIVE_TOKEN_REPAIR_KEY = "zcodeInclusiveTokenRepair_2026_09";
 const AUTO_SYNC_SOURCE_ALIASES = new Map([
   ["code", "every-code"],
   ["deepseek", "dsh"],
@@ -271,6 +286,7 @@ const AUTO_SYNC_SOURCE_ALIASES = new Map([
   ["roo-code", "roocode"],
 ]);
 const AUTO_SYNC_SOURCES = new Set([
+  "acode",
   "antigravity",
   "anythingllm",
   "claude",
@@ -280,6 +296,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "copilot",
   "craft",
   "cursor",
+  "devin",
   "droid",
   "dsh",
   "every-code",
@@ -292,6 +309,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "kiro",
   "kimi",
   "kimi-code",
+  "lmstudio",
   "mimo",
   "omo",
   "omp",
@@ -303,12 +321,14 @@ const AUTO_SYNC_SOURCES = new Set([
   "reasonix",
   "roocode",
   "trae-cn",
+  "unsloth",
   "workbuddy",
   "zcode",
   "zed",
 ]);
 const BACKGROUND_AUTO_SYNC_SOURCES = new Set([
   // Keep unscoped native 5-minute syncs bounded to dated local session trees.
+  "acode",
   "codex",
   "every-code",
   "reasonix",
@@ -473,6 +493,9 @@ async function cmdSync(argv, context = {}) {
   const traeCnNowMs = context && typeof context === "object"
     ? context.traeCnNowMs
     : undefined;
+  const cursorSyncDeps = context && typeof context.cursorSyncDeps === "object"
+    ? context.cursorSyncDeps
+    : {};
   const syncDiagnostics = diagnostics && typeof diagnostics === "object" ? diagnostics : null;
   const home = os.homedir();
   const { trackerDir } = await resolveTrackerPaths({ home });
@@ -560,6 +583,8 @@ async function cmdSync(argv, context = {}) {
       legacyBaseUrlMigration = {
         previousDeviceToken,
         replacementDeviceToken,
+        hadPersistedAnonKey: Object.prototype.hasOwnProperty.call(config, "anonKey"),
+        persistedAnonKey: config.anonKey,
       };
     }
     const codexCursorRoots = [process.env.CODEX_HOME || path.join(home, ".codex")];
@@ -691,15 +716,53 @@ async function cmdSync(argv, context = {}) {
         union: true,
       });
       if (codexPaths.native) {
-        sources.push({ source: "codex", sessionsDir: path.join(codexPaths.native, "sessions"), codexInventoryCache: true });
+        sources.push({ source: "codex", sessionsDir: path.join(codexPaths.native, "sessions"), inventoryCacheKey: "codexDayInventoryCache" });
         if (!isBackgroundLightweightSync || backgroundCodexUsageRepair) {
           sources.push({ source: "codex", sessionsDir: path.join(codexPaths.native, "archived_sessions"), deep: true });
         }
       }
       if (codexPaths.wsl) {
-        sources.push({ source: "codex", sessionsDir: path.join(codexPaths.wsl, "sessions"), codexInventoryCache: true });
+        sources.push({ source: "codex", sessionsDir: path.join(codexPaths.wsl, "sessions"), inventoryCacheKey: "codexDayInventoryCache" });
         if (!isBackgroundLightweightSync || backgroundCodexUsageRepair) {
           sources.push({ source: "codex", sessionsDir: path.join(codexPaths.wsl, "archived_sessions"), deep: true });
+        }
+      }
+    }
+    if (sourceAllowed("acode")) {
+      const acodeNativeValue =
+        process.env.TOKENTRACKER_ACODE_HOME || path.join(home, ".acode");
+      const acodePaths = resolveInstallPaths({
+        nativeValue: acodeNativeValue,
+        wslDir: ".acode",
+        requireAnyChild: ["sessions", "archived_sessions"],
+        union: true,
+      });
+      if (acodePaths.native) {
+        sources.push({
+          source: "acode",
+          sessionsDir: path.join(acodePaths.native, "sessions"),
+          inventoryCacheKey: "acodeDayInventoryCache",
+        });
+        if (!isBackgroundLightweightSync) {
+          sources.push({
+            source: "acode",
+            sessionsDir: path.join(acodePaths.native, "archived_sessions"),
+            deep: true,
+          });
+        }
+      }
+      if (acodePaths.wsl) {
+        sources.push({
+          source: "acode",
+          sessionsDir: path.join(acodePaths.wsl, "sessions"),
+          inventoryCacheKey: "acodeDayInventoryCache",
+        });
+        if (!isBackgroundLightweightSync) {
+          sources.push({
+            source: "acode",
+            sessionsDir: path.join(acodePaths.wsl, "archived_sessions"),
+            deep: true,
+          });
         }
       }
     }
@@ -719,19 +782,33 @@ async function cmdSync(argv, context = {}) {
 
     const rolloutFiles = [];
     const seenSessions = new Set();
-    const codexDayInventoryCache =
-      cursors.codexDayInventoryCache && typeof cursors.codexDayInventoryCache === "object"
-        ? cursors.codexDayInventoryCache
-        : { version: 1, days: {} };
-    if (sourceAllowed("codex")) cursors.codexDayInventoryCache = codexDayInventoryCache;
-    for (const entry of sources) {
-      if (seenSessions.has(entry.sessionsDir)) continue;
+    const uniqueSources = sources.filter((entry) => {
+      if (seenSessions.has(entry.sessionsDir)) return false;
       seenSessions.add(entry.sessionsDir);
-      const files = entry.deep
-        ? await listRolloutFilesDeep(entry.sessionsDir)
-        : await listRolloutFiles(entry.sessionsDir, entry.codexInventoryCache
-          ? { dayInventoryCache: codexDayInventoryCache }
-          : undefined);
+      return true;
+    });
+    const inventoryCaches = new Map();
+    const inventoryCacheKeys = new Set(
+      uniqueSources.map((entry) => entry.inventoryCacheKey).filter(Boolean),
+    );
+    for (const cursorKey of inventoryCacheKeys) {
+      const inventoryCache =
+        cursors[cursorKey] && typeof cursors[cursorKey] === "object"
+          ? cursors[cursorKey]
+          : { version: 1, days: {} };
+      cursors[cursorKey] = inventoryCache;
+      inventoryCaches.set(cursorKey, inventoryCache);
+    }
+    const sourceFileGroups = await Promise.all(uniqueSources.map((entry) => (
+      entry.deep
+        ? listRolloutFilesDeep(entry.sessionsDir)
+        : listRolloutFiles(entry.sessionsDir, entry.inventoryCacheKey
+          ? { dayInventoryCache: inventoryCaches.get(entry.inventoryCacheKey) }
+          : undefined)
+    )));
+    for (let sourceIndex = 0; sourceIndex < uniqueSources.length; sourceIndex++) {
+      const entry = uniqueSources[sourceIndex];
+      const files = sourceFileGroups[sourceIndex];
       for (const filePath of files) {
         rolloutFiles.push({ path: filePath, source: entry.source });
       }
@@ -1157,11 +1234,15 @@ async function cmdSync(argv, context = {}) {
         let dbResult = { messagesProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
         if (dbDir) {
           const dbPath = path.join(dbDir, "opencode.db");
-          const dbMessages = readOpencodeDbMessages(dbPath);
-          if (dbMessages.length > 0) {
+          const dbRead = readOpencodeDbMessagesIncremental(
+            dbPath,
+            cursors?.opencode?.dbCursor,
+          );
+          if (dbRead.messages.length > 0 || dbRead.cursor) {
             dbResult = await parseOpencodeDbIncremental({
               ...options,
-              dbMessages,
+              dbMessages: dbRead.messages,
+              dbCursor: dbRead.cursor,
               dbPath,
             });
           }
@@ -1247,6 +1328,39 @@ async function cmdSync(argv, context = {}) {
       }
     }
 
+    // Qoder new (JSONL) — com.qoder.app.stable / ~/.qoder/projects (2026-08+)
+    // The new Electron app no longer writes SharedClientCache/local.db; all
+    // recent sessions live in ~/.qoder/projects as flat JSONL with credit-based
+    // usage. Parse them into the same "qoder" source so history is continuous.
+    // The legacy DB block above remains as a fallback for pre-migration rows.
+    if (sourceAllowed("qoder")) {
+      try {
+        const projectsDir = resolveQoderProjectsDir({ home, env: process.env });
+        const sessionFiles = await listQoderNewSessionFiles(projectsDir);
+        if (sessionFiles.length > 0) {
+          if (progress?.enabled) {
+            progress.start(`Parsing Qoder (new) ${renderBar(0)} | buckets 0`);
+          }
+          const parsed = await parseQoderNewIncremental({
+            sessionFiles,
+            cursors,
+            queuePath,
+            projectQueuePath,
+            onProgress: makeProviderProgress("Qoder (new)"),
+            sourceKey: "qoder",
+            cursorKey: "qoderNew",
+          });
+          qoderResult = {
+            recordsProcessed: qoderResult.recordsProcessed + (parsed.messagesProcessed || 0),
+            eventsAggregated: qoderResult.eventsAggregated + (parsed.eventsAggregated || 0),
+            bucketsQueued: qoderResult.bucketsQueued + (parsed.bucketsQueued || 0),
+          };
+        }
+      } catch (err) {
+        warnProviderParseFailure("Qoder (new)", err, opts);
+      }
+    }
+
     // ── Qoder CN (国内版) — same SharedClientCache/local.db schema, separate
     // Application Support/QoderCN data directory. Tracked as its own source
     // with its own cursor namespace: the two DBs each number rowids from 1, so
@@ -1295,6 +1409,46 @@ async function cmdSync(argv, context = {}) {
         } catch (err) {
           warnProviderParseFailure("Qoder CN", err, opts);
         }
+      }
+    }
+
+    // Qoder CN new (JSONL) — the new CN app (com.qodercn.app.stable) writes
+    // ~/.qoder-cn/projects, a sibling of the international ~/.qoder/projects.
+    // Keep the divergence guard: if a user (or a future app build) points both
+    // resolvers at the same directory, the same JSONL files must not count
+    // under two sources.
+    if (sourceAllowed("qoder-cn")) {
+      try {
+        const cnProjectsDir = resolveQoderCnProjectsDir({ home, env: process.env });
+        const intlProjectsDir = resolveQoderProjectsDir({ home, env: process.env });
+        const projectsDirKey = (p) => {
+          const normalized = path.normalize(p);
+          return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+        };
+        if (projectsDirKey(cnProjectsDir) !== projectsDirKey(intlProjectsDir)) {
+          const sessionFiles = await listQoderNewSessionFiles(cnProjectsDir);
+          if (sessionFiles.length > 0) {
+            if (progress?.enabled) {
+              progress.start(`Parsing Qoder CN (new) ${renderBar(0)} | buckets 0`);
+            }
+            const parsed = await parseQoderNewIncremental({
+              sessionFiles,
+              cursors,
+              queuePath,
+              projectQueuePath,
+              onProgress: makeProviderProgress("Qoder CN (new)"),
+              sourceKey: "qoder-cn",
+              cursorKey: "qoderCnNew",
+            });
+            qoderCnResult = {
+              recordsProcessed: qoderCnResult.recordsProcessed + (parsed.messagesProcessed || 0),
+              eventsAggregated: qoderCnResult.eventsAggregated + (parsed.eventsAggregated || 0),
+              bucketsQueued: qoderCnResult.bucketsQueued + (parsed.bucketsQueued || 0),
+            };
+          }
+        }
+      } catch (err) {
+        warnProviderParseFailure("Qoder CN (new)", err, opts);
       }
     }
 
@@ -1408,6 +1562,25 @@ async function cmdSync(argv, context = {}) {
       if (zcodePaths.native || zcodePaths.wsl) {
         if (progress?.enabled) progress.start(`Parsing ZCode ${renderBar(0)} | buckets 0`);
         try {
+          const nativeUsageAvailable = [zcodePaths.native, zcodePaths.wsl]
+            .filter(Boolean)
+            .some((dbPath) => hasZcodeNativeUsageSchema(dbPath));
+          if (nativeUsageAvailable) {
+            await repairZcodeNativeUsageMigration({
+              cursors,
+              queuePath,
+              queueStatePath,
+              projectQueuePath,
+              projectQueueStatePath,
+            });
+          }
+          await repairZcodeInclusiveTokenMigration({
+            cursors,
+            queuePath,
+            queueStatePath,
+            projectQueuePath,
+            projectQueueStatePath,
+          });
           zcodeResult = await multiInstallParse({
             paths: zcodePaths, parserFn: parseOpencodeDbForInstall, providerName: "zcode",
             cursors, getParams: (p) => ({ dbPath: p, readFn: readZcodeDbMessages, source: "zcode", cursorKey: "zcode" }),
@@ -1428,7 +1601,7 @@ async function cmdSync(argv, context = {}) {
     }
 
     // ── DeepSeek Harness — passive read of ~/.dsh/sessions session logs ──
-    let dshResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    let dshResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0, deferredMigrations: 0 };
     if (sourceAllowed("dsh")) {
       await migrateLegacyDeepseekHarnessSource({ cursors, queuePath, queueStatePath });
       const dshSessionFiles = await resolveDshSessionFiles(process.env);
@@ -1447,8 +1620,58 @@ async function cmdSync(argv, context = {}) {
             queuePath,
             onProgress: makeProviderProgress("DeepSeek Harness"),
           });
+          if (dshResult.deferredMigrations > 0) {
+            warnProviderParseFailure(
+              "DeepSeek Harness",
+              new Error(
+                `${dshResult.deferredMigrations} artifact migration(s) deferred; inspect cursors.dsh.deferredMigrations and retry after the replacement is complete`,
+              ),
+              opts,
+            );
+          }
         } catch (err) {
           warnProviderParseFailure("DeepSeek Harness", err, opts);
+        }
+      }
+    }
+
+    // ── LM Studio and Unsloth Studio — passive inference usage ──
+    let lmstudioResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    if (sourceAllowed("lmstudio")) {
+      const lmstudioLogFiles = await resolveLmstudioLogFiles(process.env);
+      if (lmstudioLogFiles.length > 0) {
+        if (progress?.enabled) {
+          progress.start(
+            `Parsing LM Studio ${renderBar(0)} 0/${formatNumber(lmstudioLogFiles.length)} logs | buckets 0`,
+          );
+        }
+        try {
+          lmstudioResult = await parseLmstudioIncremental({
+            logFiles: lmstudioLogFiles,
+            cursors,
+            queuePath,
+            onProgress: makeProviderProgress("LM Studio"),
+          });
+        } catch (err) {
+          warnProviderParseFailure("LM Studio", err, opts);
+        }
+      }
+    }
+
+    let unslothResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    if (sourceAllowed("unsloth")) {
+      const unslothDbPath = resolveUnslothDbPath(process.env);
+      if (unslothDbPath && fssync.existsSync(unslothDbPath)) {
+        if (progress?.enabled) progress.start(`Parsing Unsloth ${renderBar(0)} | buckets 0`);
+        try {
+          unslothResult = await parseUnslothIncremental({
+            dbPath: unslothDbPath,
+            cursors,
+            queuePath,
+            onProgress: makeProviderProgress("Unsloth"),
+          });
+        } catch (err) {
+          warnProviderParseFailure("Unsloth", err, opts);
         }
       }
     }
@@ -1468,6 +1691,26 @@ async function cmdSync(argv, context = {}) {
           });
         } catch (err) {
           warnProviderParseFailure("AnythingLLM", err, opts);
+        }
+      }
+    }
+
+    // ── Devin CLI (Cognition) — SQLite message_nodes chat_message metrics ──
+    let devinResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    if (sourceAllowed("devin")) {
+      const devinDbPath = resolveDevinDbPath(process.env);
+      if (devinDbPath && fssync.existsSync(devinDbPath)) {
+        if (progress?.enabled) progress.start(`Parsing Devin ${renderBar(0)} | buckets 0`);
+        try {
+          devinResult = await parseDevinIncremental({
+            dbPath: devinDbPath,
+            cursors,
+            queuePath,
+            projectQueuePath,
+            onProgress: makeProviderProgress("Devin"),
+          });
+        } catch (err) {
+          warnProviderParseFailure("Devin", err, opts);
         }
       }
     }
@@ -1645,14 +1888,17 @@ async function cmdSync(argv, context = {}) {
     }
 
     let cursorResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
-    if (!isBackgroundLightweightSync && sourceAllowed("cursor") && isCursorInstalled({ home })) {
-      const cursorAuth = extractCursorSessionToken({ home });
+    const cursorInstalled = cursorSyncDeps.isInstalled || isCursorInstalled;
+    const cursorAuthExtractor = cursorSyncDeps.extractAuth || extractCursorSessionToken;
+    const cursorUsageFetcher = cursorSyncDeps.fetchUsageCsv || fetchCursorUsageCsv;
+    if (sourceAllowed("cursor") && cursorInstalled({ home })) {
+      const cursorAuth = cursorAuthExtractor({ home });
       if (cursorAuth) {
         try {
           if (progress?.enabled) {
             progress.start(`Fetching Cursor usage...`);
           }
-          const csvText = await fetchCursorUsageCsv({ cookie: cursorAuth.cookie });
+          const csvText = await cursorUsageFetcher({ cookie: cursorAuth.cookie });
           const records = parseCursorCsv(csvText);
           if (records.length > 0) {
             if (progress?.enabled) {
@@ -2214,6 +2460,7 @@ async function cmdSync(argv, context = {}) {
           sessionFiles: piFiles,
           cursors,
           queuePath,
+          projectQueuePath,
           env: process.env,
           onProgress: (p) => {
             if (!progress?.enabled) return;
@@ -2760,7 +3007,10 @@ async function cmdSync(argv, context = {}) {
       reasonixResult.recordsProcessed +
       grokResult.recordsProcessed +
       copilotResult.recordsProcessed +
+      lmstudioResult.recordsProcessed +
+      unslothResult.recordsProcessed +
       anythingllmResult.recordsProcessed +
+      devinResult.recordsProcessed +
       kiloResult.recordsProcessed +
       mimoResult.recordsProcessed +
       zcodeResult.recordsProcessed +
@@ -2797,7 +3047,10 @@ async function cmdSync(argv, context = {}) {
       reasonixResult.bucketsQueued +
       grokResult.bucketsQueued +
       copilotResult.bucketsQueued +
+      lmstudioResult.bucketsQueued +
+      unslothResult.bucketsQueued +
       anythingllmResult.bucketsQueued +
+      devinResult.bucketsQueued +
       kiloResult.bucketsQueued +
       mimoResult.bucketsQueued +
       zcodeResult.bucketsQueued +
@@ -2849,6 +3102,9 @@ async function cmdSync(argv, context = {}) {
     progress?.stop();
 
     const runtimeConfig = config ? { ...config } : {};
+    if (legacyBaseUrlMigration) {
+      delete runtimeConfig.anonKey;
+    }
     if (legacyBaseUrlMigration?.replacementDeviceToken) {
       runtimeConfig.deviceToken = legacyBaseUrlMigration.replacementDeviceToken;
     }
@@ -2902,6 +3158,7 @@ async function cmdSync(argv, context = {}) {
         const drainWithToken = (deviceToken) =>
           drainQueueToCloud({
             baseUrl: runtime.baseUrl,
+            anonKey: runtime.anonKey,
             deviceToken,
             queuePath,
             queueStatePath,
@@ -2931,15 +3188,25 @@ async function cmdSync(argv, context = {}) {
         if (legacyBaseUrlMigration && uploadResult.batches > 0) {
           // device-login does not share the sync lock and may have written a
           // fresh current-backend config while the scan/upload was running.
-          // Re-read before committing, merge only while the legacy marker still
-          // exists, and never clobber a concurrently completed login.
-          const latestConfig = (await readJson(configPath)) || config;
-          if (isLegacyInsforgeBaseUrl(latestConfig.baseUrl)) {
-            latestConfig.deviceToken = successfulDeviceToken;
-            delete latestConfig.baseUrl;
-            await writeJson(configPath, latestConfig);
-            await chmod600IfPossible(configPath);
-          }
+          // Re-read before committing and only remove the anonymous key this
+          // migration observed. A concurrent login may replace the backend URL
+          // while preserving the old key, or another writer may replace the key
+          // while the legacy URL is still present.
+          await updateJsonLocked(configPath, async (latestConfig) => {
+            const hasLegacyBaseUrl = isLegacyInsforgeBaseUrl(latestConfig.baseUrl);
+            const hasUnchangedLegacyAnonKey =
+              legacyBaseUrlMigration.hadPersistedAnonKey &&
+              latestConfig.anonKey === legacyBaseUrlMigration.persistedAnonKey;
+            if (!hasLegacyBaseUrl && !hasUnchangedLegacyAnonKey) return null;
+            if (hasLegacyBaseUrl) {
+              latestConfig.deviceToken = successfulDeviceToken;
+              delete latestConfig.baseUrl;
+            }
+            if (hasUnchangedLegacyAnonKey) {
+              delete latestConfig.anonKey;
+            }
+            return latestConfig;
+          });
         }
         // Record success so the exponential backoff step resets — otherwise
         // a single past failure keeps us pessimistically throttled forever.
@@ -3151,6 +3418,8 @@ module.exports = {
   repairCodexInterleavedUsageInflation,
   repairDroidDuplicateSessionInflation,
   repairMimoClaudeMislabel,
+  repairZcodeNativeUsageMigration,
+  repairZcodeInclusiveTokenMigration,
   reincludeClaudeMemObserverFiles,
   repairGrokQueueFromSessionSnapshots,
   applyCloudConversationsBackfill,
@@ -3626,7 +3895,7 @@ const AUTO_RETRY_MAX_DELAY_MS = 2 * 60 * 60 * 1000;
 const INGEST_SLUG = "tokentracker-ingest";
 const MAX_INGEST_BUCKETS = 500;
 
-async function drainQueueToCloud({ baseUrl, deviceToken, queuePath, queueStatePath, maxBatches = 5, batchSize = 200 }) {
+async function drainQueueToCloud({ baseUrl, anonKey, deviceToken, queuePath, queueStatePath, maxBatches = 5, batchSize = 200 }) {
   const state = (await readJson(queueStatePath)) || { offset: 0 };
   let offset = Number(state.offset || 0);
   let inserted = 0;
@@ -3645,7 +3914,6 @@ async function drainQueueToCloud({ baseUrl, deviceToken, queuePath, queueStatePa
     if (result.buckets.length === 0 && result.sessionStates.length === 0) break;
 
     const root = baseUrl.replace(/\/$/, "");
-    const anonKey = process.env.TOKENTRACKER_INSFORGE_ANON_KEY || "";
     const headers = {
       "Content-Type": "application/json",
       Accept: "application/json",
@@ -4127,6 +4395,148 @@ async function repairMimoClaudeMislabel({
     removedProject,
   };
   return true;
+}
+
+async function resetUploadOffsetForZcodeRepair(queueStatePath, note) {
+  if (typeof queueStatePath !== "string" || !queueStatePath) return false;
+  let state = {};
+  try {
+    state = JSON.parse(await fs.readFile(queueStatePath, "utf8"));
+  } catch (_error) {
+    state = {};
+  }
+  state.offset = 0;
+  state.updatedAt = new Date().toISOString();
+  state.note = note;
+  await ensureDir(path.dirname(queueStatePath));
+  await fs.writeFile(queueStatePath, JSON.stringify(state, null, 2) + "\n", "utf8");
+  return true;
+}
+
+async function dropZcodeQueueRows(filePath, { retainRetractions = false } = {}) {
+  let raw;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return { removed: 0, retractions: 0 };
+    throw error;
+  }
+  const kept = [];
+  const retractions = new Map();
+  let removed = 0;
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch (_error) {
+      kept.push(line);
+      continue;
+    }
+    if (row?.source === "zcode") {
+      removed += 1;
+      const model = typeof row.model === "string" && row.model.trim()
+        ? row.model.trim()
+        : "unknown";
+      const hourStart = typeof row.hour_start === "string" ? row.hour_start : "";
+      if (retainRetractions && hourStart) {
+        retractions.set(`${model}|${hourStart}`, {
+          source: "zcode",
+          model,
+          hour_start: hourStart,
+          input_tokens: 0,
+          cached_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          output_tokens: 0,
+          reasoning_output_tokens: 0,
+          total_tokens: 0,
+          conversation_count: 0,
+        });
+      }
+      continue;
+    }
+    kept.push(line);
+  }
+  if (removed === 0) return { removed: 0, retractions: 0 };
+  await backupExistingFile(filePath);
+  const tmp = `${filePath}.zcoderepair.${process.pid}.${Date.now()}`;
+  const rewritten = [
+    ...kept,
+    ...[...retractions.values()].map((row) => JSON.stringify(row)),
+  ];
+  await fs.writeFile(tmp, rewritten.length ? rewritten.join("\n") + "\n" : "", "utf8");
+  await fs.rename(tmp, filePath);
+  return { removed, retractions: retractions.size };
+}
+
+async function repairZcodeUsageMigration({
+  migrationKey,
+  queueStateNote,
+  cursors,
+  queuePath,
+  queueStatePath,
+  projectQueuePath,
+  projectQueueStatePath,
+} = {}) {
+  if (!cursors || typeof cursors !== "object") return false;
+  const migrations = (cursors.migrations ||= {});
+  if (migrations[migrationKey]) return false;
+
+  const mainRepair = await dropZcodeQueueRows(queuePath, { retainRetractions: true });
+  const projectRepair = projectQueuePath
+    ? await dropZcodeQueueRows(projectQueuePath)
+    : { removed: 0, retractions: 0 };
+
+  const hourly = cursors.hourly && typeof cursors.hourly === "object" ? cursors.hourly : null;
+  if (hourly?.buckets) {
+    for (const key of Object.keys(hourly.buckets)) {
+      if (key.startsWith("zcode|")) delete hourly.buckets[key];
+    }
+  }
+  if (hourly?.groupQueued) {
+    for (const key of Object.keys(hourly.groupQueued)) {
+      if (key.startsWith("zcode|")) delete hourly.groupQueued[key];
+    }
+  }
+  const projectHourly = cursors.projectHourly && typeof cursors.projectHourly === "object"
+    ? cursors.projectHourly
+    : null;
+  if (projectHourly?.buckets) {
+    for (const key of Object.keys(projectHourly.buckets)) {
+      if (key.includes("|zcode|")) delete projectHourly.buckets[key];
+    }
+  }
+  delete cursors.zcode;
+
+  if (mainRepair.removed > 0) {
+    await resetUploadOffsetForZcodeRepair(queueStatePath, queueStateNote);
+  }
+  if (projectRepair.removed > 0) {
+    await resetUploadOffsetForZcodeRepair(projectQueueStatePath, queueStateNote);
+  }
+  migrations[migrationKey] = {
+    appliedAt: new Date().toISOString(),
+    removedMain: mainRepair.removed,
+    removedProject: projectRepair.removed,
+    retractions: mainRepair.retractions,
+  };
+  return true;
+}
+
+async function repairZcodeNativeUsageMigration(options = {}) {
+  return repairZcodeUsageMigration({
+    ...options,
+    migrationKey: ZCODE_NATIVE_USAGE_REPAIR_KEY,
+    queueStateNote: "reset_after_zcode_native_usage_repair_2026_08",
+  });
+}
+
+async function repairZcodeInclusiveTokenMigration(options = {}) {
+  return repairZcodeUsageMigration({
+    ...options,
+    migrationKey: ZCODE_INCLUSIVE_TOKEN_REPAIR_KEY,
+    queueStateNote: "reset_after_zcode_inclusive_token_repair_2026_09",
+  });
 }
 
 async function repairGrokQueueFromSessionSnapshots({ cursors, queuePath, queueStatePath } = {}) {

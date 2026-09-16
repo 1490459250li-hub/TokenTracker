@@ -28,9 +28,18 @@ export { LIMIT_PROVIDER_ICON_KEYS, limitProviderIconKey, limitProviderName };
 const ORDER_KEY = "tt.limits.providerOrder";
 const VISIBILITY_KEY = "tt.limits.providerVisibility";
 const DISPLAY_MODE_KEY = "tt.limits.displayMode";
+const SHOW_SUBSCRIPTIONS_KEY = "tt.limits.showSubscriptions";
 const UPDATED_AT_KEY = "tt.limits.updatedAt";
 const NATIVE_PREFERENCES_KEY = "limitsPreferences";
 const NATIVE_DISPLAY_MODE_KEY = "limitsDisplayMode";
+
+/**
+ * Dispatched on `window` whenever a limits-preferences snapshot is applied —
+ * the `storage` event never fires in the window that made the change, so
+ * same-window consumers (and the native mirror landing through applySnapshot)
+ * need this to re-read the saved selection.
+ */
+export const LIMITS_PREFS_CHANGED_EVENT = "tt:limits-prefs-changed";
 
 export const LIMIT_DISPLAY_MODES = Object.freeze({
   USED: "used",
@@ -42,6 +51,7 @@ const STORAGE_KEYS = new Set([
   ORDER_KEY,
   VISIBILITY_KEY,
   DISPLAY_MODE_KEY,
+  SHOW_SUBSCRIPTIONS_KEY,
   UPDATED_AT_KEY,
 ]);
 
@@ -49,8 +59,16 @@ function defaultOrder() {
   return [...ALL_LIMIT_PROVIDERS];
 }
 
+// Providers that read local credentials or call a subscription quota API only
+// after the user turns them on in Settings > Usage & Limits > Providers. The
+// stored selection doubles as the opt-in flag the local API requires before
+// reading credentials, so they default OFF — display-only providers stay on.
+const OPT_IN_PROVIDERS = new Set(["devin"]);
+
 function defaultVisibility() {
-  return Object.fromEntries(ALL_LIMIT_PROVIDERS.map((id) => [id, true]));
+  return Object.fromEntries(
+    ALL_LIMIT_PROVIDERS.map((id) => [id, !OPT_IN_PROVIDERS.has(id)]),
+  );
 }
 
 function normalizeOrder(value) {
@@ -83,6 +101,10 @@ function normalizeDisplayMode(value) {
   return VALID_DISPLAY_MODES.has(value) ? value : LIMIT_DISPLAY_MODES.USED;
 }
 
+function normalizeShowSubscriptions(value) {
+  return typeof value === "boolean" ? value : true;
+}
+
 function normalizeUpdatedAt(value) {
   if (value === null || value === undefined) return undefined;
   if (typeof value === "number") {
@@ -103,6 +125,7 @@ function normalizeSnapshot(value = {}) {
     displayMode: normalizeDisplayMode(source.displayMode),
     providerOrder: normalizeOrder(source.providerOrder),
     providerVisibility: normalizeVisibility(source.providerVisibility),
+    showSubscriptions: normalizeShowSubscriptions(source.showSubscriptions),
     updatedAt: normalizeUpdatedAt(source.updatedAt),
   };
 }
@@ -127,6 +150,20 @@ function readVisibility() {
   }
 }
 
+/** `storage`-event key filter matching every key this module persists. */
+export function isLimitsPrefsStorageKey(key) {
+  return key === null || STORAGE_KEYS.has(key);
+}
+
+/**
+ * The saved Devin provider selection — the opt-in fact every usage-limits
+ * request must forward. Only an explicit `true` in stored visibility counts;
+ * anything else (absent, default-filled, non-boolean) is off.
+ */
+export function isDevinProviderSelected() {
+  return readVisibility().devin === true;
+}
+
 function readDisplayMode() {
   if (typeof window === "undefined") return LIMIT_DISPLAY_MODES.USED;
   try {
@@ -134,6 +171,17 @@ function readDisplayMode() {
     return VALID_DISPLAY_MODES.has(raw) ? raw : LIMIT_DISPLAY_MODES.USED;
   } catch {
     return LIMIT_DISPLAY_MODES.USED;
+  }
+}
+
+function readShowSubscriptions() {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = window.localStorage.getItem(SHOW_SUBSCRIPTIONS_KEY);
+    if (raw === null) return true;
+    return normalizeShowSubscriptions(JSON.parse(raw));
+  } catch {
+    return true;
   }
 }
 
@@ -163,6 +211,7 @@ function readLocalSnapshot() {
     displayMode: readDisplayMode(),
     providerOrder: readOrder(),
     providerVisibility: readVisibility(),
+    showSubscriptions: readShowSubscriptions(),
     updatedAt: readUpdatedAt(),
   });
 }
@@ -180,6 +229,10 @@ function writeLocalSnapshot(snapshot) {
       JSON.stringify(normalized.providerVisibility),
     );
     window.localStorage.setItem(DISPLAY_MODE_KEY, normalized.displayMode);
+    window.localStorage.setItem(
+      SHOW_SUBSCRIPTIONS_KEY,
+      JSON.stringify(normalized.showSubscriptions),
+    );
     if (normalized.updatedAt === undefined) {
       window.localStorage.removeItem(UPDATED_AT_KEY);
     } else {
@@ -196,6 +249,7 @@ function toBridgeSnapshot(snapshot) {
     displayMode: normalized.displayMode,
     providerOrder: [...normalized.providerOrder],
     providerVisibility: { ...normalized.providerVisibility },
+    showSubscriptions: normalized.showSubscriptions,
     updatedAt: normalized.updatedAt ?? null,
   };
 }
@@ -226,7 +280,8 @@ function samePreferences(a, b) {
   return (
     a.displayMode === b.displayMode &&
     sameOrder(a.providerOrder, b.providerOrder) &&
-    sameVisibility(a.providerVisibility, b.providerVisibility)
+    sameVisibility(a.providerVisibility, b.providerVisibility) &&
+    a.showSubscriptions === b.showSubscriptions
   );
 }
 
@@ -255,6 +310,9 @@ export function useLimitsDisplayPrefs() {
     prefsRef.current = next;
     setPrefs(next);
     if (options.writeLocal) writeLocalSnapshot(next);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(LIMITS_PREFS_CHANGED_EVENT));
+    }
     return next;
   }, []);
 
@@ -285,6 +343,10 @@ export function useLimitsDisplayPrefs() {
   const setDisplayMode = useCallback((mode) => {
     if (!VALID_DISPLAY_MODES.has(mode)) return;
     commitUserChange((current) => ({ ...current, displayMode: mode }));
+  }, [commitUserChange]);
+
+  const setShowSubscriptions = useCallback((value) => {
+    commitUserChange((current) => ({ ...current, showSubscriptions: Boolean(value) }));
   }, [commitUserChange]);
 
   const applyLegacyDisplayMode = useCallback((mode) => {
@@ -401,6 +463,7 @@ export function useLimitsDisplayPrefs() {
       displayMode: LIMIT_DISPLAY_MODES.USED,
       providerOrder: defaultOrder(),
       providerVisibility: defaultVisibility(),
+      showSubscriptions: true,
     }));
   }, [commitUserChange]);
 
@@ -417,7 +480,9 @@ export function useLimitsDisplayPrefs() {
     order: prefs.providerOrder,
     visibility: prefs.providerVisibility,
     displayMode: prefs.displayMode,
+    showSubscriptions: prefs.showSubscriptions,
     setDisplayMode,
+    setShowSubscriptions,
     visibleOrdered,
     toggle,
     moveUp,

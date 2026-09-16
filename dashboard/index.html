@@ -123,7 +123,7 @@
               "price": "0",
               "priceCurrency": "USD"
             },
-            "description": "Local-first AI coding usage tracker for 35 tools, with a desktop pet, four widgets, achievements, native macOS and Windows apps, accurate cross-provider deduplication, and no prompt collection."
+            "description": "Local-first AI coding usage tracker for 39 tools, with a desktop pet, four widgets, achievements, native macOS and Windows apps, accurate cross-provider deduplication, and no prompt collection."
           },
           {
             "@type": "WebSite",
@@ -198,7 +198,11 @@
               { "@type": "ListItem", "position": 32, "name": "Claude Science" },
               { "@type": "ListItem", "position": 33, "name": "DeepSeek Harness" },
               { "@type": "ListItem", "position": 34, "name": "TRAE Work CN" },
-              { "@type": "ListItem", "position": 35, "name": "OmO" }
+              { "@type": "ListItem", "position": 35, "name": "AStudio" },
+              { "@type": "ListItem", "position": 36, "name": "LM Studio" },
+              { "@type": "ListItem", "position": 37, "name": "Unsloth Studio" },
+              { "@type": "ListItem", "position": 38, "name": "Devin CLI" },
+              { "@type": "ListItem", "position": 39, "name": "OmO" }
             ]
           },
           {
@@ -217,7 +221,7 @@
                 "name": "Which AI coding CLIs does Token Tracker support?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Token Tracker supports 35 AI coding tools, including Claude Code, Codex CLI, Cursor, Gemini CLI, Antigravity, Kiro, OpenCode, OpenClaw, Every Code, Hermes Agent, GitHub Copilot, Kimi Code, CodeBuddy, WorkBuddy, Grok Build, oh-my-pi, OmO, pi, Dots, Prime Agent, Craft Agents, Reasonix, Kilo CLI, Kilo Code, Roo Code, Zed Agent, Goose, Droid, Mimo Code, ZCode, Qoder, AnythingLLM Desktop, Claude Science, DeepSeek Harness, and TRAE Work CN."
+                  "text": "Token Tracker supports 39 AI coding tools, including Claude Code, Codex CLI, AStudio, Cursor, Gemini CLI, Antigravity, Kiro, OpenCode, OpenClaw, Every Code, Hermes Agent, GitHub Copilot, Kimi Code, CodeBuddy, WorkBuddy, Grok Build, oh-my-pi, OmO, pi, Dots, Prime Agent, Craft Agents, Reasonix, Kilo CLI, Kilo Code, Roo Code, Zed Agent, Goose, Droid, Mimo Code, ZCode, Qoder, AnythingLLM Desktop, Claude Science, DeepSeek Harness, TRAE Work CN, LM Studio, Unsloth Studio, and Devin CLI."
                 }
               },
               {
@@ -241,7 +245,7 @@
                 "name": "What does Token Tracker track?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Token Tracker tracks input, output, cached, and cache-creation tokens per model, project, and time window. It also detects usage limits for 13 providers, including Claude, Codex, Cursor, Gemini, Antigravity, Qoder, and Qoder CN."
+                  "text": "__TOKENTRACKER_DISCOVERY_TRACKED_USAGE__"
                 }
               },
               {
@@ -249,7 +253,7 @@
                 "name": "How do I monitor AI token usage and cost across tools?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Install Token Tracker with npx tokentracker-cli. It is an AI token usage and cost tracker that monitors token consumption and spend across all 35 supported tools in one dashboard, with per-model pricing across 2,200+ models so you can see cost by model, project, and time window without manual tracking."
+                  "text": "Install Token Tracker with npx tokentracker-cli. It is an AI token usage and cost tracker that monitors token consumption and spend across all 39 supported tools in one dashboard, with per-model pricing across 2,200+ models so you can see cost by model, project, and time window without manual tracking."
                 }
               },
               {
@@ -271,7 +275,7 @@
       <h1>Token Tracker: monitor AI token usage and cost with a local dashboard and desktop companion</h1>
       <p>
         Token Tracker is a free, open-source, local-first dashboard that automatically tracks and monitors token usage
-        and cost across 35 AI coding tools — including Claude Code, OpenAI Codex, Cursor, Gemini CLI, DeepSeek Harness, and TRAE Work CN. A desktop pet
+        and cost across 39 AI coding tools — including Claude Code, OpenAI Codex, AStudio, Cursor, Gemini CLI, LM Studio, and Unsloth Studio. A desktop pet
         reacts to real token activity, four desktop widgets
         keep usage visible, and achievements turn coding history into progress. Native macOS and Windows apps
         sit on top of accurate cross-provider deduplication. Token counts only — never prompts or conversations.
@@ -296,9 +300,9 @@
         <li><strong>Desktop pet</strong> — a pixel companion that reacts to real token burn, streaks, and rest.</li>
         <li><strong>Four desktop widgets</strong> — usage, activity heatmap, top models, and limits at a glance.</li>
         <li><strong>Achievements</strong> — unlock milestones from local and optional account-wide activity.</li>
-        <li><strong>Unified usage dashboard</strong> — input, output, cached, and cache-creation tokens across 35 AI coding tools.</li>
+        <li><strong>Unified usage dashboard</strong> — input, output, cached, and cache-creation tokens across 39 AI coding tools.</li>
         <li><strong>Cost analysis</strong> — per-model pricing across 2,200+ models with an offline snapshot.</li>
-        <li><strong>Usage limits view</strong> — live quota and subscription status for 13 providers, with last-good caching for local providers such as Antigravity and Qoder.</li>
+        <li><strong>Usage limits view</strong> — __TOKENTRACKER_DISCOVERY_LIMITS_SUMMARY__</li>
         <li><strong>Service Status page</strong> — live operational and incident status from eight official provider status pages.</li>
         <li><strong>Project attribution</strong> — see which repository or workspace consumed which tokens.</li>
         <li><strong>Activity heatmap & trend charts</strong> — GitHub-style contribution calendar plus day / week / month / total / custom-range charts.</li>
@@ -307,15 +311,16 @@
       </ul>
       <p><em>Privacy by design</em>: token counts only, never prompts or conversation content. Local-first; cloud sync is optional and powers only the public leaderboard.</p>
 
-      <h2>Supported AI coding tools (35)</h2>
+      <h2>Supported AI coding tools (39)</h2>
       <p>
         Use Token Tracker as a Claude Code token tracker, Codex token tracker, Cursor token tracker,
         Gemini token tracker, OpenCode token tracker, GitHub Copilot token tracker, or DeepSeek Harness token tracker — one dashboard
-        covers all 35 tools below.
+        covers all 39 tools below.
       </p>
       <ul>
         <li><strong>Claude Code</strong> — Anthropic's official coding agent CLI; integrated via SessionEnd hook.</li>
         <li><strong>Codex CLI</strong> — OpenAI Codex command-line agent; integrated via TOML notify array in <code>~/.codex/config.toml</code>.</li>
+        <li><strong>AStudio</strong> — Codex-based coding agent; integrated via TOML notify array in <code>~/.acode/config.toml</code> and passive live/archived rollout scans.</li>
         <li><strong>Cursor</strong> — editor usage from local state and provider data.</li>
         <li><strong>Gemini CLI</strong> — Google Gemini coding CLI; SessionEnd hook integration.</li>
         <li><strong>Antigravity</strong> — passive transcript reader.</li>
@@ -330,6 +335,7 @@
         <li><strong>WorkBuddy (Tencent)</strong> — SessionEnd hook and passive session reader.</li>
         <li><strong>Grok Build</strong> — hook and passive cumulative usage reader.</li>
         <li><strong>oh-my-pi</strong> — passive JSONL session reader.</li>
+        <li><strong>OmO</strong> — passive JSONL session reader, including nested subagent transcripts.</li>
         <li><strong>pi</strong> — passive JSONL session reader.</li>
         <li><strong>Dots</strong> — routed through pi's provider split; no separate hook.</li>
         <li><strong>Prime Agent</strong> — metadata-only passive usage reader.</li>
@@ -348,6 +354,9 @@
         <li><strong>Claude Science</strong> — passive reader for the <code>frames</code> table of <code>operon-cli.db</code>.</li>
         <li><strong>DeepSeek Harness</strong> — passive session reader (<code>~/.dsh/sessions/**/session.jsonl[.zstd]</code>).</li>
         <li><strong>TRAE Work CN</strong> — macOS signed-in app session-token reader; its internal API may change.</li>
+        <li><strong>LM Studio</strong> — passive local developer-server usage reader with mirrored-response deduplication.</li>
+        <li><strong>Unsloth Studio</strong> — passive scalar-only SQLite usage reader for local and paid-provider chat routes.</li>
+        <li><strong>Devin CLI</strong> — passive per-request SQLite usage reader deduplicated by request_id.</li>
       </ul>
 
       <h2>Who should use Token Tracker</h2>
@@ -378,7 +387,7 @@
       <p>Run <code>npx tokentracker-cli</code>. The CLI auto-detects your AI coding tools, installs hooks, and opens the dashboard.</p>
 
       <h3>Which AI coding tools does Token Tracker support?</h3>
-      <p>Token Tracker supports 35 tools: Claude Code, Codex CLI, Cursor, Gemini CLI, Antigravity, Kiro, OpenCode, OpenClaw, Every Code, Hermes Agent, GitHub Copilot, Kimi Code, CodeBuddy, WorkBuddy, Grok Build, oh-my-pi, OmO, pi, Dots, Prime Agent, Craft Agents, Reasonix, Kilo CLI, Kilo Code, Roo Code, Zed Agent, Goose, Droid, Mimo Code, ZCode, Qoder, AnythingLLM Desktop, Claude Science, DeepSeek Harness, and TRAE Work CN.</p>
+      <p>Token Tracker supports 39 tools: Claude Code, Codex CLI, AStudio, Cursor, Gemini CLI, Antigravity, Kiro, OpenCode, OpenClaw, Every Code, Hermes Agent, GitHub Copilot, Kimi Code, CodeBuddy, WorkBuddy, Grok Build, oh-my-pi, OmO, pi, Dots, Prime Agent, Craft Agents, Reasonix, Kilo CLI, Kilo Code, Roo Code, Zed Agent, Goose, Droid, Mimo Code, ZCode, Qoder, AnythingLLM Desktop, Claude Science, DeepSeek Harness, TRAE Work CN, LM Studio, Unsloth Studio, and Devin CLI.</p>
 
       <h3>Is Token Tracker free and open source?</h3>
       <p>Yes. Source on GitHub at <a href="https://github.com/xiufengsun/TokenTracker">github.com/xiufengsun/TokenTracker</a>; npm package <code>tokentracker-cli</code>.</p>
@@ -387,10 +396,10 @@
       <p>No. Only token counts, model names, timestamps, and project attribution are recorded. Prompts and completions are never read or uploaded.</p>
 
       <h3>What does Token Tracker track?</h3>
-      <p>Input, output, cached, and cache-creation tokens per model, project, and time window. It also surfaces usage limits for 13 providers, including Claude, Codex, Cursor, Gemini, Antigravity, Qoder, and Qoder CN.</p>
+      <p>__TOKENTRACKER_DISCOVERY_FAQ_USAGE__</p>
 
       <h3>How do I monitor AI token usage and cost across tools?</h3>
-      <p>Token Tracker is an AI token usage and cost tracker: install it with <code>npx tokentracker-cli</code>, and it monitors token consumption and spend across all 35 tools in one dashboard, with per-model pricing across 2,200+ models so you can see cost by model, project, and time window without manual tracking.</p>
+      <p>Token Tracker is an AI token usage and cost tracker: install it with <code>npx tokentracker-cli</code>, and it monitors token consumption and spend across all 39 tools in one dashboard, with per-model pricing across 2,200+ models so you can see cost by model, project, and time window without manual tracking.</p>
 
       <h3>Does Token Tracker work offline?</h3>
       <p>Yes. Token Tracker is local-first. All parsing, aggregation, and dashboard rendering happen on your machine. Cloud sync is optional and powers only the public leaderboard.</p>

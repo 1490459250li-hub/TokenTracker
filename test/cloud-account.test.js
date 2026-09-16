@@ -11,6 +11,7 @@ const {
   mintAccessToken,
   fetchAccountFunction,
   fetchAccountUsage,
+  AccountAuthError,
   __resetCloudAccountCacheForTests,
 } = require("../src/lib/cloud-account");
 
@@ -100,6 +101,27 @@ test("mintAccessToken caches by refresh token and skips re-fetch until near expi
   // A different refresh token must bypass the cache.
   await mintAccessToken({ ...args, refreshToken: "refresh-other" });
   assert.equal(fetchCount, 2);
+});
+
+test("concurrent token refreshes share one in-flight request", async () => {
+  __resetCloudAccountCacheForTests();
+  const access = makeJwt({ expSeconds: Math.floor(Date.now() / 1000) + 3600 });
+  let calls = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const fetchImpl = async () => {
+    calls += 1;
+    await gate;
+    return jsonResponse({ accessToken: access });
+  };
+  const first = mintAccessToken({ baseUrl: "https://cloud.example", refreshToken: "same", fetchImpl });
+  const second = mintAccessToken({ baseUrl: "https://cloud.example", refreshToken: "same", fetchImpl });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  release();
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.accessToken, access);
+  assert.equal(b.accessToken, access);
 });
 
 test("mintAccessToken scopes cache by base URL", async () => {
@@ -266,4 +288,92 @@ test("fetchAccountUsage threads the rotated csrf token through to the caller", a
   });
   assert.equal(out.rotatedRefreshToken, "rotated");
   assert.equal(out.rotatedCsrfToken, "csrf-rotated");
+});
+
+// --- Single-flight refresh ---------------------------------------------------
+//
+// A full popover refresh fires six account reads at once. Before this, each one
+// POSTed /api/auth/refresh with the same refresh token; when the backend rotates
+// refresh tokens the losers of that race presented a consumed token and failed,
+// which the popover then rendered as "you only have this machine".
+
+test("concurrent mints with the same refresh token share one refresh request", async () => {
+  __resetCloudAccountCacheForTests();
+  const jwt = makeJwt({ expSeconds: Math.floor(Date.now() / 1000) + 3600 });
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    await new Promise((r) => setTimeout(r, 5));
+    return jsonResponse({ accessToken: jwt, refreshToken: "rotated" });
+  };
+
+  const results = await Promise.all(
+    Array.from({ length: 6 }, () =>
+      mintAccessToken({ baseUrl: "https://api.test", refreshToken: "r1", fetchImpl }),
+    ),
+  );
+
+  assert.equal(calls, 1);
+  for (const r of results) assert.equal(r.accessToken, jwt);
+});
+
+test("a failed single-flight mint does not poison later attempts", async () => {
+  __resetCloudAccountCacheForTests();
+  const jwt = makeJwt({ expSeconds: Math.floor(Date.now() / 1000) + 3600 });
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls === 1) throw new TypeError("fetch failed");
+    return jsonResponse({ accessToken: jwt });
+  };
+
+  const failed = await Promise.all([
+    mintAccessToken({ baseUrl: "https://api.test", refreshToken: "r1", fetchImpl }),
+    mintAccessToken({ baseUrl: "https://api.test", refreshToken: "r1", fetchImpl }),
+  ]);
+  assert.deepEqual(failed, [null, null]);
+  assert.equal(calls, 1, "both callers share the failing flight");
+
+  const retried = await mintAccessToken({ baseUrl: "https://api.test", refreshToken: "r1", fetchImpl });
+  assert.equal(retried.accessToken, jwt);
+  assert.equal(calls, 2, "the in-flight entry must be cleared once it settles");
+});
+
+test("throwOnFailure classifies why the refresh failed", async () => {
+  const cases = [
+    ["auth_network", async () => { throw new TypeError("fetch failed"); }],
+    ["auth_timeout", async () => { const e = new Error("aborted"); e.name = "AbortError"; throw e; }],
+    ["auth_rejected", async () => jsonResponse({ error: "consumed" }, false, 401)],
+    ["auth_invalid", async () => jsonResponse({ nothing: true })],
+  ];
+  for (const [code, fetchImpl] of cases) {
+    __resetCloudAccountCacheForTests();
+    await assert.rejects(
+      mintAccessToken({
+        baseUrl: "https://api.test",
+        refreshToken: `r-${code}`,
+        fetchImpl,
+        throwOnFailure: true,
+      }),
+      (err) => {
+        assert.ok(err instanceof AccountAuthError);
+        assert.equal(err.code, code);
+        return true;
+      },
+    );
+  }
+});
+
+test("fetchAccountUsage throws (not returns null) when a signed-in refresh fails", async () => {
+  __resetCloudAccountCacheForTests();
+  await assert.rejects(
+    fetchAccountUsage({
+      usageSlug: "tokentracker-usage-heatmap",
+      refreshToken: "r1",
+      baseUrl: "https://api.test",
+      fetchImpl: async () => jsonResponse({ error: "nope" }, false, 401),
+    }),
+    (err) => err.code === "auth_rejected",
+    "Returning null here would look identical to 'not signed in'.",
+  );
 });

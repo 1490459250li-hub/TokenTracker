@@ -32,6 +32,7 @@ try {
 const { runSql } = sqlite ? require("./helpers/sqlite-write") : { runSql: null };
 const {
   readOpencodeDbMessages,
+  readOpencodeDbMessagesIncremental,
   parseOpencodeDbIncremental,
 } = require("../src/lib/rollout");
 
@@ -198,14 +199,86 @@ test("readOpencodeDbMessages handles histories larger than the JavaScript argume
     }));
     const sqliteOptions = {
       execFileSync(_command, args) {
-        return JSON.stringify(args.at(-1).includes("sqlite_master")
-          ? [{ hasRows: 0, sessionTable: "session" }]
-          : largeHistory);
+        const sql = args.at(-1);
+        if (sql.includes("sqlite_master")) {
+          return JSON.stringify([{ hasRows: 0, sessionTable: "session" }]);
+        }
+        if (sql.includes("MAX(rowid)")) {
+          return JSON.stringify([{ max_row_id: largeHistory.length }]);
+        }
+        if (sql.includes("WHERE rowid =")) {
+          return JSON.stringify([{
+            row_id: largeHistory.length,
+            id: `msg_${largeHistory.length - 1}`,
+            time_created: largeHistory.length,
+          }]);
+        }
+        return JSON.stringify(largeHistory);
       },
     };
 
     const rows = readOpencodeDbMessages(dbPath, sqliteOptions);
     assert.equal(rows.length, largeHistory.length);
+  });
+});
+
+test("readOpencodeDbMessagesIncremental replays a replacement racing its anchor check", async () => {
+  await withTmp(async (tmp) => {
+    const dbPath = path.join(tmp, "opencode.db");
+    await fs.writeFile(dbPath, "", "utf8");
+    const rows = (prefix, timeBase) => Array.from({ length: 4 }, (_, index) => {
+      const id = `${prefix}_${index + 1}`;
+      const data = {
+        ...v1AssistantMessage({ id, sessionID: `${prefix}_session_${index + 1}` }),
+        time: { created: timeBase + index, completed: timeBase + index },
+      };
+      return {
+        row_id: index + 1,
+        id,
+        session_id: data.sessionID,
+        time_created: data.time.created,
+        time_updated: data.time.completed,
+        data: JSON.stringify(data),
+      };
+    });
+    const oldRows = rows("old", 1_000);
+    const replacementRows = rows("replacement", 1);
+    let currentRows = oldRows;
+    let raceOnIncrementalQuery = false;
+    const sqliteOptions = {
+      execFileSync(_command, args) {
+        const sql = args.at(-1);
+        if (sql.includes("sqlite_master")) {
+          return JSON.stringify([{ hasRows: 0, sessionTable: "session" }]);
+        }
+        if (sql.includes("MAX(rowid)")) {
+          return JSON.stringify([{ max_row_id: currentRows.length }]);
+        }
+        if (sql.includes("WHERE rowid =")) {
+          const rowId = Number(sql.match(/WHERE rowid = (\d+)/)?.[1]);
+          const row = currentRows.find((entry) => entry.row_id === rowId);
+          return JSON.stringify(row ? [row] : []);
+        }
+        if (sql.includes("json_extract")) {
+          if (raceOnIncrementalQuery && sql.includes("rowid >")) {
+            raceOnIncrementalQuery = false;
+            currentRows = replacementRows;
+            return "[]";
+          }
+          return JSON.stringify(currentRows);
+        }
+        return "[]";
+      },
+    };
+
+    const first = readOpencodeDbMessagesIncremental(dbPath, null, sqliteOptions);
+    raceOnIncrementalQuery = true;
+    const replayed = readOpencodeDbMessagesIncremental(dbPath, first.cursor, sqliteOptions);
+    assert.deepEqual(
+      replayed.messages.map((entry) => entry.id),
+      ["replacement_1", "replacement_2", "replacement_3", "replacement_4"],
+    );
+    assert.ok(replayed.cursor?.v1?.anchor);
   });
 });
 
@@ -255,6 +328,131 @@ if (sqlite) {
     });
   });
 
+  test("readOpencodeDbMessages keeps cache-only usage in v1 and v2", async () => {
+    await withTmp(async (tmp) => {
+      const v1Path = path.join(tmp, "v1.db");
+      buildFixtureDb(v1Path, {
+        type: "A",
+        messages: [v1AssistantMessage({
+          id: "msg_cache_v1",
+          sessionID: "ses_cache_v1",
+          input: 0,
+          output: 0,
+          cached: 42,
+          cacheWrite: 7,
+        })],
+      });
+      assert.deepEqual(readOpencodeDbMessages(v1Path).map((entry) => entry.id), ["msg_cache_v1"]);
+
+      const v2Path = path.join(tmp, "v2.db");
+      buildFixtureDb(v2Path, {
+        type: "B",
+        sessions: [{ id: "ses_cache_v2", directory: "/tmp/cache" }],
+        v2Messages: [v2AssistantMessage({
+          id: "msg_cache_v2",
+          sessionID: "ses_cache_v2",
+          input: 0,
+          output: 0,
+          cached: 55,
+          cacheWrite: 9,
+        })],
+      });
+      assert.deepEqual(readOpencodeDbMessages(v2Path).map((entry) => entry.id), ["msg_cache_v2"]);
+    });
+  });
+
+  test("readOpencodeDbMessagesIncremental returns only new, updated, and timestamp-boundary rows", async () => {
+    await withTmp(async (tmp) => {
+      const dbPath = path.join(tmp, "opencode.db");
+      const base = Date.parse("2026-08-01T10:00:00.000Z");
+      const withTime = (message, created, completed = created) => ({
+        ...message,
+        time: { created, completed },
+      });
+      buildFixtureDb(dbPath, {
+        type: "A",
+        messages: [
+          withTime(v1AssistantMessage({ id: "msg_1", sessionID: "ses_1" }), base + 1000),
+          withTime(v1AssistantMessage({ id: "msg_2", sessionID: "ses_2" }), base + 2000),
+          withTime(v1AssistantMessage({ id: "msg_3", sessionID: "ses_3" }), base + 3000),
+        ],
+      });
+
+      const first = readOpencodeDbMessagesIncremental(dbPath);
+      assert.equal(first.messages.length, 3);
+      assert.ok(first.cursor?.v1);
+
+      const db = new sqlite.DatabaseSync(dbPath);
+      try {
+        const updated = withTime(
+          v1AssistantMessage({ id: "msg_1", sessionID: "ses_1", output: 99 }),
+          base + 1000,
+          base + 4000,
+        );
+        db.prepare("UPDATE message SET time_updated = ?, data = ? WHERE id = ?")
+          .run(updated.time.completed, JSON.stringify(updated), updated.id);
+
+        // Imported history can carry an old timestamp. The rowid watermark must
+        // still include it even though it sits behind the timestamp watermark.
+        const imported = withTime(
+          v1AssistantMessage({ id: "msg_4", sessionID: "ses_4" }),
+          base + 500,
+        );
+        db.prepare(
+          "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+        ).run(
+          imported.id,
+          imported.sessionID,
+          imported.time.created,
+          imported.time.completed,
+          JSON.stringify(imported),
+        );
+      } finally {
+        db.close();
+      }
+
+      const second = readOpencodeDbMessagesIncremental(dbPath, first.cursor);
+      assert.deepEqual(
+        second.messages.map((entry) => entry.id).sort(),
+        ["msg_1", "msg_3", "msg_4"],
+      );
+      assert.equal(second.messages.find((entry) => entry.id === "msg_1").data.tokens.output, 99);
+
+      const third = readOpencodeDbMessagesIncremental(dbPath, second.cursor);
+      assert.deepEqual(third.messages.map((entry) => entry.id), ["msg_1"]);
+
+      // A same-file reset can preserve the database identity. A lower max
+      // rowid must still invalidate the watermark and replay the replacement.
+      const resetDb = new sqlite.DatabaseSync(dbPath);
+      try {
+        resetDb.exec("DELETE FROM message");
+        const insert = resetDb.prepare(
+          "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+        );
+        for (let index = 1; index <= 4; index += 1) {
+          const replacement = withTime(
+            v1AssistantMessage({ id: `msg_reset_${index}`, sessionID: `ses_reset_${index}` }),
+            base + index,
+          );
+          insert.run(
+            replacement.id,
+            replacement.sessionID,
+            replacement.time.created,
+            replacement.time.completed,
+            JSON.stringify(replacement),
+          );
+        }
+      } finally {
+        resetDb.close();
+      }
+      const replayed = readOpencodeDbMessagesIncremental(dbPath, third.cursor);
+      assert.deepEqual(
+        replayed.messages.map((entry) => entry.id),
+        ["msg_reset_1", "msg_reset_2", "msg_reset_3", "msg_reset_4"],
+      );
+    });
+  });
+
   test("type C (upstream v2 with session table): directory injected from session.directory", async () => {
     await withTmp(async (tmp) => {
       const dbPath = path.join(tmp, "opencode.db");
@@ -264,9 +462,46 @@ if (sqlite) {
         v2Messages: [v2AssistantMessage({ id: "msg_c", sessionID: "ses_c" })],
       });
 
-      const rows = readOpencodeDbMessages(dbPath);
-      assert.equal(rows.length, 1);
-      assert.equal(rows[0].data.path.cwd, "/Users/bob/dev/phones");
+      const first = readOpencodeDbMessagesIncremental(dbPath);
+      assert.equal(first.messages.length, 1);
+      assert.equal(first.messages[0].data.path.cwd, "/Users/bob/dev/phones");
+      assert.ok(first.cursor?.v2);
+
+      const second = readOpencodeDbMessagesIncremental(dbPath, first.cursor);
+      assert.deepEqual(second.messages.map((entry) => entry.id), ["msg_c"]);
+
+      const resetDb = new sqlite.DatabaseSync(dbPath);
+      try {
+        resetDb.exec("DELETE FROM session_message; DELETE FROM session");
+        const insertSession = resetDb.prepare("INSERT INTO session (id, directory) VALUES (?, ?)");
+        const insertMessage = resetDb.prepare(
+          "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        );
+        for (let index = 1; index <= 2; index += 1) {
+          const sessionID = `ses_reset_${index}`;
+          const message = {
+            ...v2AssistantMessage({ id: `msg_reset_${index}`, sessionID }),
+            time: { created: index, completed: index },
+          };
+          insertSession.run(sessionID, `/tmp/reset-${index}`);
+          insertMessage.run(
+            message.id,
+            sessionID,
+            "assistant",
+            index,
+            message.time.created,
+            message.time.completed,
+            JSON.stringify(message),
+          );
+        }
+      } finally {
+        resetDb.close();
+      }
+      const replayed = readOpencodeDbMessagesIncremental(dbPath, second.cursor);
+      assert.deepEqual(
+        replayed.messages.map((entry) => entry.id),
+        ["msg_reset_1", "msg_reset_2"],
+      );
     });
   });
 
@@ -293,6 +528,16 @@ if (sqlite) {
                 if (sql.includes("sqlite_master")) {
                   // The combined probe: hasRows=0 (empty), sessionTable='session'
                   return { all: () => [{ hasRows: 0, sessionTable: "session" }] };
+                }
+                if (sql.includes("MAX(rowid)")) {
+                  return { all: () => [{ max_row_id: 1 }] };
+                }
+                if (sql.includes("WHERE rowid = 1")) {
+                  return { all: () => [{
+                    row_id: 1,
+                    id: "msg_a1",
+                    time_created: Date.parse("2026-08-01T10:00:00.000Z"),
+                  }] };
                 }
                 if (/FROM message /.test(sql)) {
                   return {
@@ -387,6 +632,16 @@ if (sqlite) {
               prepare(sql) {
                 if (sql.includes("sqlite_master")) {
                   throw new Error("no such table: session_message");
+                }
+                if (sql.includes("MAX(rowid)")) {
+                  return { all: () => [{ max_row_id: 1 }] };
+                }
+                if (sql.includes("WHERE rowid = 1")) {
+                  return { all: () => [{
+                    row_id: 1,
+                    id: "msg_v1",
+                    time_created: Date.parse("2026-08-01T10:00:00.000Z"),
+                  }] };
                 }
                 if (/FROM message /.test(sql)) {
                   return {
@@ -519,9 +774,10 @@ if (sqlite) {
       const projectQueuePath = path.join(tmp, "project.queue.jsonl");
       const cursors = { version: 1, files: {}, updatedAt: null };
 
-      const dbMessages = readOpencodeDbMessages(dbPath);
+      const dbRead = readOpencodeDbMessagesIncremental(dbPath);
       const res = await parseOpencodeDbIncremental({
-        dbMessages,
+        dbMessages: dbRead.messages,
+        dbCursor: dbRead.cursor,
         dbPath,
         cursors,
         queuePath,
@@ -534,6 +790,7 @@ if (sqlite) {
       const { rows } = await queueTotals(queuePath);
       assert.equal(rows.length, 1);
       assert.equal(rows[0].model, "x-preview-f-free");
+      assert.deepEqual(cursors.opencode.dbCursor, dbRead.cursor);
 
       const projectRows = await readQueue(projectQueuePath);
       assert.equal(projectRows.length, 1);
