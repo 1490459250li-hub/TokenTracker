@@ -168,8 +168,8 @@ After `SMAppService.mainApp.register/unregister` from the bridge (not via `Launc
 
 ### Skills registry mutations
 
-- **`installSkill()` downloads for minutes and only then writes the registry — take every field from a fresh `readRegistry()` at the sync checkpoint, never from the pre-download snapshot.** The guard before `removePath(dest)` is deliberately the last point where nothing has awaited, so existence *and* `targets` are both read there: another tab, the menu bar app or the local API can uninstall the skill, retarget it, or drop a different repo's skill into the same install directory while the download runs. PR #613 fixed existence and left `targets` on the stale copy, so toggling an agent mid-update silently reverted the toggle.
-- **Temp dirs use `fs.mkdtempSync`, never `${name}-${Date.now()}`.** Millisecond-resolution names collide once two mutations overlap, and the old `removePath(temp)` then deleted the other run's in-flight download. `runMutation` in `SkillsPage.jsx` serialises the UI behind an `operationInFlight` ref — `busyKey` state alone commits too late to block a fast second click — but `/functions/tokentracker-skills` has no such lock.
+- **`installSkill()` downloads for minutes before it writes, so read every field from a fresh `readRegistry()` at the sync checkpoint, never from the pre-download snapshot.** The guard before `removePath(dest)` (`skills-manager.js:984`) is the last point where nothing has awaited, so existence *and* `targets` (`:982`) must both be read there. #613 refreshed existence but kept `targets` from the stale copy, so toggling an agent mid-download silently reverted it.
+- **Temp dirs use `fs.mkdtempSync` (`skills-manager.js:963`), never `${name}-${Date.now()}`.** Millisecond names collide once mutations overlap, and `removePath(temp)` then deletes the other run's in-flight download. `SkillsPage.jsx:855` serialises the UI behind an `operationInFlight` ref because `busyKey` state commits too late to block a fast second click. `/functions/tokentracker-skills` has no such lock.
 
 ### Cloud moderation (leaderboard bans / quarantine)
 
