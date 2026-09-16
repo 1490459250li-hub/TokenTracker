@@ -56,6 +56,12 @@ describe("formatProviderDisplayName", () => {
     expect(formatProviderDisplayName("OMP")).toBe("oh-my-pi");
   });
 
+  it("formats omo as OmO without colliding with omp", () => {
+    expect(formatProviderDisplayName("omo")).toBe("OmO");
+    expect(formatProviderDisplayName("OMO")).toBe("OmO");
+    expect(formatProviderDisplayName("omo")).not.toBe(formatProviderDisplayName("omp"));
+  });
+
   it("uses the registered DeepSeek Harness product name for current and legacy sources", () => {
     expect(formatProviderDisplayName("dsh")).toBe("DeepSeek Harness");
     expect(formatProviderDisplayName("deepseek")).toBe("DeepSeek Harness");

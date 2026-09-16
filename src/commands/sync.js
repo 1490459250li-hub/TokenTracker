@@ -82,6 +82,10 @@ const {
   resolveOmpSessionFiles,
   resolveOmpSubagentFiles,
   parseOmpIncremental,
+  resolveOmoSessionFiles,
+  resolveOmoSubagentFiles,
+  parseOmoIncremental,
+  omoAgentDirCollidesWithOmp,
   resolvePiSessionFiles,
   parsePiIncremental,
   piAgentDirCollidesWithOmp,
@@ -307,6 +311,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "kimi-code",
   "lmstudio",
   "mimo",
+  "omo",
   "omp",
   "opencode",
   "openclaw",
@@ -2399,6 +2404,45 @@ async function cmdSync(argv, context = {}) {
       }
     }
 
+    // ── OmO (passive ~/.omo/agent/sessions/**/*.jsonl reader) ──
+    // Same session format as oh-my-pi, but a separate install root, cursor
+    // namespace and source label, so the two never shadow each other.
+    let omoResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    // Skip OmO when its agent dir resolves to the same path as omp's, so an
+    // explicit TOKENTRACKER_OMO_AGENT_DIR pointing at ~/.omp/agent cannot
+    // double-count the same transcripts under two source labels.
+    const omoCollidesWithOmp = omoAgentDirCollidesWithOmp(process.env);
+    const omoFiles = !sourceAllowed("omo") || omoCollidesWithOmp
+      ? []
+      : mergeBothFileSources({ resolveFiles: resolveOmoSessionFiles, env: process.env });
+    const omoSubagentFiles = !sourceAllowed("omo") || omoCollidesWithOmp
+      ? []
+      : mergeBothFileSources({ resolveFiles: resolveOmoSubagentFiles, env: process.env });
+    if (omoFiles.length > 0 || omoSubagentFiles.length > 0) {
+      if (progress?.enabled) {
+        progress.start(`Parsing OmO ${renderBar(0)} | buckets 0`);
+      }
+      try {
+        omoResult = await parseOmoIncremental({
+          sessionFiles: omoFiles,
+          subagentFiles: omoSubagentFiles,
+          cursors,
+          queuePath,
+          projectQueuePath,
+          env: process.env,
+          onProgress: (p) => {
+            if (!progress?.enabled) return;
+            const pct = p.total > 0 ? p.index / p.total : 1;
+            progress.update(
+              `Parsing OmO ${renderBar(pct)} ${formatNumber(p.index)}/${formatNumber(p.total)} files | buckets ${formatNumber(p.bucketsQueued)}`,
+            );
+          },
+        });
+      } catch (err) {
+        warnProviderParseFailure("OmO", err, opts);
+      }
+    }
+
     // ── pi (@mariozechner/pi-coding-agent) — passive ~/.pi/agent/sessions/**/*.jsonl reader ──
     // Skip pi parse if its agent dir resolves to the same path as omp's. This
     // prevents double-counting when explicit overrides (TOKENTRACKER_OMP_AGENT_DIR /
@@ -2956,6 +3000,7 @@ async function cmdSync(argv, context = {}) {
       codebuddyResult.recordsProcessed +
       workbuddyResult.recordsProcessed +
       ompResult.recordsProcessed +
+      omoResult.recordsProcessed +
       piResult.recordsProcessed +
       primeAgentResult.recordsProcessed +
       craftResult.recordsProcessed +
@@ -2995,6 +3040,7 @@ async function cmdSync(argv, context = {}) {
       codebuddyResult.bucketsQueued +
       workbuddyResult.bucketsQueued +
       ompResult.bucketsQueued +
+      omoResult.bucketsQueued +
       piResult.bucketsQueued +
       primeAgentResult.bucketsQueued +
       craftResult.bucketsQueued +

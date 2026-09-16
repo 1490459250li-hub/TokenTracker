@@ -10896,8 +10896,10 @@ function resolveOmpAgentDir(env = process.env) {
   return ompHome ? path.join(ompHome, "agent") : null;
 }
 
-function resolveOmpSessionFiles(env = process.env) {
-  const agentDir = resolveOmpAgentDir(env);
+// Session-file discovery is shared with OmO (omo), which persists the exact
+// same on-disk layout under its own agent dir:
+//   <agentDir>/sessions/--<cwd-encoded>--/<timestamp>_<sessionId>.jsonl
+function collectPiStyleSessionFiles(agentDir) {
   if (!agentDir) return [];
   const sessionsDir = path.join(agentDir, "sessions");
   if (!fssync.existsSync(sessionsDir)) return [];
@@ -10922,6 +10924,10 @@ function resolveOmpSessionFiles(env = process.env) {
   return files;
 }
 
+function resolveOmpSessionFiles(env = process.env) {
+  return collectPiStyleSessionFiles(resolveOmpAgentDir(env));
+}
+
 // Subagent transcripts live in a directory named after the session file:
 //   ~/.omp/agent/sessions/<cwd>/<session>.jsonl            (main agent)
 //   ~/.omp/agent/sessions/<cwd>/<session>/<Agent>.jsonl    (task subagent)
@@ -10930,8 +10936,8 @@ function resolveOmpSessionFiles(env = process.env) {
 // rel path <= 2 segments → main, deeper → subagent/advisor), so we mirror
 // that: everything below the cwd level is subagent traffic. Session dirs also
 // hold non-JSONL artefacts (*.bash-original.log, *.md) — skipped by extension.
-function resolveOmpSubagentFiles(env = process.env) {
-  const agentDir = resolveOmpAgentDir(env);
+// OmO nests the same way, so it reuses this walker.
+function collectPiStyleSubagentFiles(agentDir) {
   if (!agentDir) return [];
   const sessionsDir = path.join(agentDir, "sessions");
   if (!fssync.existsSync(sessionsDir)) return [];
@@ -10979,20 +10985,24 @@ function resolveOmpSubagentFiles(env = process.env) {
   return files;
 }
 
+function resolveOmpSubagentFiles(env = process.env) {
+  return collectPiStyleSubagentFiles(resolveOmpAgentDir(env));
+}
+
 function resolveOmpDefaultModel() {
   // oh-my-pi has no global default model setting; model is per-message.
   return "omp-unknown";
 }
 
-const OMP_HEADER_SCAN_MAX_BYTES = 65536;
+const PI_STYLE_HEADER_SCAN_MAX_BYTES = 65536;
 
-async function resolveOmpFileCwd(filePath) {
+async function readPiStyleSessionCwd(filePath) {
   let stream;
   try {
     stream = fssync.createReadStream(filePath, {
       encoding: "utf8",
       start: 0,
-      end: OMP_HEADER_SCAN_MAX_BYTES,
+      end: PI_STYLE_HEADER_SCAN_MAX_BYTES,
     });
   } catch {
     return null;
@@ -11011,6 +11021,95 @@ async function resolveOmpFileCwd(filePath) {
     stream.close?.();
   }
   return null;
+}
+
+async function resolveOmpFileCwd(filePath) {
+  return readPiStyleSessionCwd(filePath);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OmO (omo) — passive JSONL reader (~/.omo/agent/sessions/**/*.jsonl)
+//
+// OmO shares oh-my-pi's session persistence format, so it reuses the same
+// collectors and parser. Layout:
+//   ~/.omo/agent/sessions/--<cwd-encoded>--/<timestamp>_<sessionId>.jsonl
+//
+// First line is the type:"session" header (carries the real, unencoded cwd).
+// Only type:"message" lines with message.role=="assistant" carry usage:
+//
+//   {
+//     "type": "message",
+//     "id": "7ae3734f",              ← 8-char dedup key
+//     "timestamp": "2026-08-27T23:28:16.699Z",
+//     "message": {
+//       "role": "assistant",
+//       "provider": "xai",
+//       "model": "grok-4.6",
+//       "usage": {
+//         "input": 28646, "output": 630, "cacheRead": 512, "cacheWrite": 0,
+//         "reasoning": 218, "totalTokens": 29788,
+//         "cost": { ... }            ← OmO's own estimate; ignored, we price it
+//       },
+//       "timestamp": 1787873284870   ← ms epoch, preferred for bucketing
+//     }
+//   }
+//
+// Two deliberate differences from oh-my-pi:
+//   1. The reasoning field is `reasoning`, not `reasoningTokens`.
+//   2. Reasoning is a SUBSET of `output`, and `totalTokens` excludes it —
+//      verified across a 2,586-message corpus where
+//      input+output+cacheRead+cacheWrite === totalTokens for every row, and
+//      `usage.cost` bills no separate reasoning component. So omo follows the
+//      Codex convention: reasoning_output_tokens is informational and must not
+//      be billed on top of output (see computeRowCost in lib/pricing/index.js).
+//
+// OmO is a router — the upstream model name is recorded per message and there
+// is no global default (fallback: "omo-unknown").
+//
+// Path overrides are TokenTracker-only (TOKENTRACKER_OMO_AGENT_DIR /
+// TOKENTRACKER_OMO_HOME / OMO_HOME). PI_CONFIG_DIR and PI_CODING_AGENT_DIR are
+// deliberately NOT honored here: those belong to pi/omp, and routing them to a
+// third provider would reintroduce the ambiguity decidePiCodingAgentDirOwner
+// exists to resolve.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function resolveOmoHome(env = process.env) {
+  if (env.TOKENTRACKER_OMO_HOME) return expandHomePath(env.TOKENTRACKER_OMO_HOME, env);
+  if (env.OMO_HOME) return expandHomePath(env.OMO_HOME, env);
+  const home = env.HOME || require("node:os").homedir();
+  if (process.platform === "win32") {
+    return pickWin32ProviderPath({
+      env,
+      nativeValue: path.join(home, ".omo"),
+      wslProviderDir: ".omo",
+    });
+  }
+  return path.join(home, ".omo");
+}
+
+function resolveOmoAgentDir(env = process.env) {
+  if (env.TOKENTRACKER_OMO_AGENT_DIR) {
+    return expandHomePath(env.TOKENTRACKER_OMO_AGENT_DIR, env);
+  }
+  const omoHome = resolveOmoHome(env);
+  return omoHome ? path.join(omoHome, "agent") : null;
+}
+
+function resolveOmoSessionFiles(env = process.env) {
+  return collectPiStyleSessionFiles(resolveOmoAgentDir(env));
+}
+
+function resolveOmoSubagentFiles(env = process.env) {
+  return collectPiStyleSubagentFiles(resolveOmoAgentDir(env));
+}
+
+function resolveOmoDefaultModel() {
+  // OmO has no global default model setting; model is per-message.
+  return "omo-unknown";
+}
+
+async function resolveOmoFileCwd(filePath) {
+  return readPiStyleSessionCwd(filePath);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -14594,7 +14693,23 @@ async function parseKilocodeIncremental({
   return { recordsProcessed, eventsAggregated, bucketsQueued };
 }
 
-async function parseOmpIncremental({
+// Reads the first present numeric field. oh-my-pi emits `reasoningTokens`;
+// OmO emits `reasoning`. Listing the accepted keys per provider keeps each
+// one's accounting exact instead of guessing across both spellings.
+function pickUsageInt(usage, fields) {
+  for (const field of fields) {
+    const raw = usage?.[field];
+    if (raw == null) continue;
+    const value = Number(raw);
+    if (Number.isFinite(value)) return toNonNegativeInt(value);
+  }
+  return 0;
+}
+
+// Shared implementation for the oh-my-pi session format. omp and omo both
+// persist it verbatim, so they differ only in where the sessions live, which
+// cursor namespace they own, and how reasoning tokens are spelled.
+async function parseOmpLikeIncremental({
   sessionFiles,
   subagentFiles,
   cursors,
@@ -14604,41 +14719,50 @@ async function parseOmpIncremental({
   onProgress,
   env,
   defaultModel,
+  stateKey,
+  source,
+  resolveSessionFiles,
+  resolveSubagentFiles,
+  resolveDefaultModel,
+  resolveFileCwd,
+  reasoningFields,
+  reasoningIncludedInOutput = false,
 } = {}) {
   await ensureDir(path.dirname(queuePath));
   const projectEnabled = typeof projectQueuePath === "string" && projectQueuePath.length > 0;
-  const ompState = cursors.omp && typeof cursors.omp === "object" ? cursors.omp : {};
-  const seenIds = new Set(Array.isArray(ompState.seenIds) ? ompState.seenIds : []);
+  const providerState =
+    cursors[stateKey] && typeof cursors[stateKey] === "object" ? cursors[stateKey] : {};
+  const seenIds = new Set(Array.isArray(providerState.seenIds) ? providerState.seenIds : []);
   const projectSeenIds = new Set(
-    Array.isArray(ompState.projectSeenIds) ? ompState.projectSeenIds : [],
+    Array.isArray(providerState.projectSeenIds) ? providerState.projectSeenIds : [],
   );
   const fileOffsets =
-    ompState.fileOffsets && typeof ompState.fileOffsets === "object"
-      ? { ...ompState.fileOffsets }
+    providerState.fileOffsets && typeof providerState.fileOffsets === "object"
+      ? { ...providerState.fileOffsets }
       : {};
   const projectFileOffsets =
-    ompState.projectFileOffsets && typeof ompState.projectFileOffsets === "object"
-      ? { ...ompState.projectFileOffsets }
+    providerState.projectFileOffsets && typeof providerState.projectFileOffsets === "object"
+      ? { ...providerState.projectFileOffsets }
       : {};
 
   const mainFiles = Array.isArray(sessionFiles)
     ? sessionFiles
-    : resolveOmpSessionFiles(env || process.env);
+    : resolveSessionFiles(env || process.env);
   // Subagent transcripts share the session format and count toward the same
-  // "omp" totals; they're discovered separately because they nest below the
+  // provider totals; they're discovered separately because they nest below the
   // cwd level. When the caller supplies explicit sessionFiles (tests), don't
   // auto-resolve — keep the parse hermetic.
   const subFiles = Array.isArray(subagentFiles)
     ? subagentFiles
     : Array.isArray(sessionFiles)
       ? []
-      : resolveOmpSubagentFiles(env || process.env);
+      : resolveSubagentFiles(env || process.env);
   const files = [...mainFiles, ...subFiles];
-  const fallbackModel = defaultModel || resolveOmpDefaultModel();
+  const fallbackModel = defaultModel || resolveDefaultModel();
 
   if (files.length === 0) {
-    cursors.omp = {
-      ...ompState,
+    cursors[stateKey] = {
+      ...providerState,
       seenIds: Array.from(seenIds),
       fileOffsets,
       ...(projectEnabled
@@ -14716,7 +14840,7 @@ async function parseOmpIncremental({
       const output = toNonNegativeInt(usage.output);
       const cacheRead = toNonNegativeInt(usage.cacheRead);
       const cacheWrite = toNonNegativeInt(usage.cacheWrite);
-      const reasoningTokens = toNonNegativeInt(usage.reasoningTokens);
+      const reasoningTokens = pickUsageInt(usage, reasoningFields);
 
       if (
         input === 0 &&
@@ -14749,10 +14873,12 @@ async function parseOmpIncremental({
       if (!bucketStart) continue;
 
       // Use provided totalTokens when available; otherwise sum all components.
+      // OmO folds reasoning into output, so the fallback must not add it again.
       const totalTokens =
         Number.isFinite(Number(usage.totalTokens)) && Number(usage.totalTokens) > 0
           ? toNonNegativeInt(usage.totalTokens)
-          : input + output + cacheRead + cacheWrite + reasoningTokens;
+          : input + output + cacheRead + cacheWrite +
+            (reasoningIncludedInOutput ? 0 : reasoningTokens);
 
       const model = normalizeModelInput(msg.model) || fallbackModel;
 
@@ -14766,9 +14892,9 @@ async function parseOmpIncremental({
         conversation_count: 1,
       };
 
-      const bucket = getHourlyBucket(hourlyState, "omp", model, bucketStart);
+      const bucket = getHourlyBucket(hourlyState, source, model, bucketStart);
       addTotals(bucket.totals, delta);
-      touchedBuckets.add(bucketKey("omp", model, bucketStart));
+      touchedBuckets.add(bucketKey(source, model, bucketStart));
       seenIds.add(entryId);
       eventsAggregated++;
 
@@ -14809,7 +14935,7 @@ async function parseOmpIncremental({
       const startOffset = stat.size < prevSize || inodeChanged ? 0 : prevSize;
       if (stat.size <= startOffset) continue;
 
-      const cwd = await resolveOmpFileCwd(filePath);
+      const cwd = await resolveFileCwd(filePath);
       const projectContext = cwd
         ? await resolveProjectContextForPath({
             startDir: wsl.mapWslCwdToUnc(cwd, filePath),
@@ -14848,7 +14974,7 @@ async function parseOmpIncremental({
           const output = toNonNegativeInt(usage.output);
           const cacheRead = toNonNegativeInt(usage.cacheRead);
           const cacheWrite = toNonNegativeInt(usage.cacheWrite);
-          const reasoningTokens = toNonNegativeInt(usage.reasoningTokens);
+          const reasoningTokens = pickUsageInt(usage, reasoningFields);
           if (
             input === 0 &&
             output === 0 &&
@@ -14878,7 +15004,8 @@ async function parseOmpIncremental({
           const totalTokens =
             Number.isFinite(Number(usage.totalTokens)) && Number(usage.totalTokens) > 0
               ? toNonNegativeInt(usage.totalTokens)
-              : input + output + cacheRead + cacheWrite + reasoningTokens;
+              : input + output + cacheRead + cacheWrite +
+                (reasoningIncludedInOutput ? 0 : reasoningTokens);
           const delta = {
             input_tokens: input,
             cached_input_tokens: cacheRead,
@@ -14891,12 +15018,12 @@ async function parseOmpIncremental({
           const projectBucket = getProjectBucket(
             projectState,
             projectKey,
-            "omp",
+            source,
             bucketStart,
             projectRef,
           );
           addTotals(projectBucket.totals, delta);
-          projectTouchedBuckets.add(projectBucketKey(projectKey, "omp", bucketStart));
+          projectTouchedBuckets.add(projectBucketKey(projectKey, source, bucketStart));
           projectSeenIds.add(entryId);
         }
       }
@@ -14941,8 +15068,8 @@ async function parseOmpIncremental({
     projectState.updatedAt = updatedAt;
     cursors.projectHourly = projectState;
   }
-  cursors.omp = {
-    ...ompState,
+  cursors[stateKey] = {
+    ...providerState,
     seenIds: cappedSeen,
     fileOffsets,
     ...(projectEnabled
@@ -14955,6 +15082,33 @@ async function parseOmpIncremental({
   };
 
   return { recordsProcessed, eventsAggregated, bucketsQueued, projectBucketsQueued };
+}
+
+async function parseOmpIncremental(options = {}) {
+  return parseOmpLikeIncremental({
+    ...options,
+    stateKey: "omp",
+    source: "omp",
+    resolveSessionFiles: resolveOmpSessionFiles,
+    resolveSubagentFiles: resolveOmpSubagentFiles,
+    resolveDefaultModel: resolveOmpDefaultModel,
+    resolveFileCwd: resolveOmpFileCwd,
+    reasoningFields: ["reasoningTokens"],
+  });
+}
+
+async function parseOmoIncremental(options = {}) {
+  return parseOmpLikeIncremental({
+    ...options,
+    stateKey: "omo",
+    source: "omo",
+    resolveSessionFiles: resolveOmoSessionFiles,
+    resolveSubagentFiles: resolveOmoSubagentFiles,
+    resolveDefaultModel: resolveOmoDefaultModel,
+    resolveFileCwd: resolveOmoFileCwd,
+    reasoningFields: ["reasoningTokens", "reasoning"],
+    reasoningIncludedInOutput: true,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -15005,6 +15159,13 @@ function piAgentDirCollidesWithOmp(env = process.env) {
   const ompAgentDir = resolveOmpAgentDir(env);
   if (!piAgentDir || !ompAgentDir) return false;
   return path.resolve(piAgentDir) === path.resolve(ompAgentDir);
+}
+
+function omoAgentDirCollidesWithOmp(env = process.env) {
+  const omoAgentDir = resolveOmoAgentDir(env);
+  const ompAgentDir = resolveOmpAgentDir(env);
+  if (!omoAgentDir || !ompAgentDir) return false;
+  return path.resolve(omoAgentDir) === path.resolve(ompAgentDir);
 }
 
 function resolvePiSessionFiles(env = process.env) {
@@ -21773,6 +21934,12 @@ module.exports = {
   resolveOmpSubagentFiles,
   resolveOmpDefaultModel,
   parseOmpIncremental,
+  resolveOmoHome,
+  resolveOmoAgentDir,
+  resolveOmoSessionFiles,
+  resolveOmoSubagentFiles,
+  resolveOmoDefaultModel,
+  parseOmoIncremental,
   resolveKilocodeRoots,
   resolveKilocodeTaskFiles,
   normalizeKilocodeProviderToModel,
@@ -21826,6 +21993,7 @@ module.exports = {
   resolvePiDefaultModel,
   parsePiIncremental,
   piAgentDirCollidesWithOmp,
+  omoAgentDirCollidesWithOmp,
   resolvePrimeAgentHome,
   resolvePrimeAgentDir,
   resolvePrimeAgentSessionFiles,
