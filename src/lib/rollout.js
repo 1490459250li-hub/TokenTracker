@@ -22,6 +22,11 @@ const {
   snapshotCodexModelAttributionState,
 } = require("./codex-model-attribution");
 const {
+  CODEX_SERVICE_TIER_MARKER,
+  readCodexServiceTier,
+  isPriorityServiceTier,
+} = require("./codex-service-tier");
+const {
   DEVIN_TABLE_PROBE_SQL,
   devinUsageSql,
   buildDevinUsageEvents,
@@ -471,6 +476,7 @@ async function parseRolloutIncremental({
       ? prev.tokenUsageBaselines || null
       : null;
     const lastModel = sameInode && !truncated ? prev.lastModel || null : null;
+    const lastServiceTier = sameInode && !truncated ? prev.lastServiceTier || null : null;
     const modelAttributionState = sameInode && !truncated
       ? prev.modelAttributionState || null
       : null;
@@ -551,6 +557,7 @@ async function parseRolloutIncremental({
           lastTotal,
           tokenUsageBaselines,
           lastModel,
+          lastServiceTier,
           modelAttributionState,
           projectState,
           projectMetaCache,
@@ -566,6 +573,7 @@ async function parseRolloutIncremental({
           lastTotal,
           tokenUsageBaselines,
           lastModel,
+          lastServiceTier,
           modelAttributionState,
           hourlyState,
           touchedBuckets,
@@ -589,6 +597,7 @@ async function parseRolloutIncremental({
       lastTotal: result.lastTotal,
       tokenUsageBaselines: result.tokenUsageBaselines,
       lastModel: result.lastModel,
+      lastServiceTier: result.lastServiceTier || null,
       modelAttributionState: result.modelAttributionState,
       updatedAt: new Date().toISOString(),
     };
@@ -2060,6 +2069,7 @@ async function parseRolloutFile({
   lastTotal,
   tokenUsageBaselines,
   lastModel,
+  lastServiceTier,
   modelAttributionState: previousModelAttributionState,
   hourlyState,
   touchedBuckets,
@@ -2086,6 +2096,7 @@ async function parseRolloutFile({
       lastTotal,
       tokenUsageBaselines,
       lastModel,
+      lastServiceTier: typeof lastServiceTier === "string" ? lastServiceTier : null,
       modelAttributionState: previousModelAttributionState,
       eventsAggregated: 0,
       projectFileContexts,
@@ -2098,6 +2109,12 @@ async function parseRolloutFile({
   });
 
   let model = typeof lastModel === "string" ? lastModel : null;
+  // Codex writes thread_settings_applied before the turn_context of the turn it
+  // takes effect on, and token_count rows carry no turn id, so a row's tier is
+  // whatever the last such record said. A session's first turn has none, and
+  // most CLI sessions have none at all — that stays null, and null is billed at
+  // Standard rather than guessed from the current config.
+  let serviceTier = typeof lastServiceTier === "string" ? lastServiceTier : null;
   const modelAttributionState = createCodexModelAttributionState(
     previousModelAttributionState || { model },
   );
@@ -2148,7 +2165,10 @@ async function parseRolloutFile({
         line.includes('"cwd"') ||
         line.includes('"current_date"') ||
         line.includes('"forked_from_id"'));
-    if (!maybeTokenCount && !maybeTurnContext && !maybeModelReroute) {
+    const maybeServiceTier =
+      !maybeTokenCount && !maybeModelReroute && !maybeTurnContext &&
+      line.includes(CODEX_SERVICE_TIER_MARKER);
+    if (!maybeTokenCount && !maybeTurnContext && !maybeModelReroute && !maybeServiceTier) {
       if (invalidRecordPolicy === "throw" || !record.terminated) {
         try {
           JSON.parse(line);
@@ -2173,6 +2193,12 @@ async function parseRolloutFile({
 
     applyCodexModelEvent(modelAttributionState, obj);
     model = currentCodexModel(modelAttributionState) || model;
+
+    const appliedServiceTier = readCodexServiceTier(obj);
+    if (appliedServiceTier) {
+      serviceTier = appliedServiceTier;
+      continue;
+    }
 
     if (
       (obj?.type === "turn_context" || obj?.type === "session_meta") &&
@@ -2301,6 +2327,9 @@ async function parseRolloutFile({
 
     const bucket = getHourlyBucket(hourlyState, source, model, bucketStart);
     addTotals(bucket.totals, delta);
+    // Only the model bucket gets the subset: the project bucket below carries
+    // no model, so no per-model rate can be applied to it anyway.
+    if (isPriorityServiceTier(serviceTier)) addPriorityUsage(bucket.totals, delta);
     touchedBuckets.add(bucketKey(source, model, bucketStart));
     if (currentProjectKey && projectState && projectTouchedBuckets) {
       const projectBucket = getProjectBucket(
@@ -2321,6 +2350,7 @@ async function parseRolloutFile({
     lastTotal: latestTotal,
     tokenUsageBaselines: snapshotUsageBaselines(usageDeltaState),
     lastModel: model,
+    lastServiceTier: serviceTier,
     modelAttributionState: snapshotCodexModelAttributionState(modelAttributionState),
     eventsAggregated,
     projectFileContexts,
@@ -2333,6 +2363,7 @@ async function scanRolloutProjectFileContexts({
   lastTotal,
   tokenUsageBaselines,
   lastModel,
+  lastServiceTier,
   modelAttributionState,
   projectState,
   projectMetaCache,
@@ -2351,6 +2382,7 @@ async function scanRolloutProjectFileContexts({
       lastTotal,
       tokenUsageBaselines,
       lastModel,
+      lastServiceTier: lastServiceTier || null,
       modelAttributionState,
       eventsAggregated: 0,
       projectFileContexts,
@@ -2428,6 +2460,7 @@ async function scanRolloutProjectFileContexts({
     lastTotal,
     tokenUsageBaselines,
     lastModel,
+    lastServiceTier: lastServiceTier || null,
     modelAttributionState,
     eventsAggregated: 0,
     projectFileContexts,
@@ -3003,6 +3036,7 @@ async function enqueueTouchedBuckets({ queuePath, hourlyState, touchedBuckets })
             billable_total_tokens: totals.billable_total_tokens ?? totals.total_tokens,
             total_cost_usd: totals.total_cost_usd || 0,
             usage_precision: usagePrecision || undefined,
+            ...prioritySubsetOf(totals),
             conversation_count: totals.conversation_count,
           }),
         );
@@ -3083,6 +3117,7 @@ async function enqueueTouchedBuckets({ queuePath, hourlyState, touchedBuckets })
         billable_total_tokens: unknownBucket.totals.billable_total_tokens ?? unknownBucket.totals.total_tokens,
         total_cost_usd: unknownBucket.totals.total_cost_usd || 0,
         usage_precision: usagePrecision || undefined,
+        ...prioritySubsetOf(unknownBucket.totals),
         conversation_count: unknownBucket.totals.conversation_count,
       }),
     );
@@ -3131,6 +3166,7 @@ async function enqueueTouchedBuckets({ queuePath, hourlyState, touchedBuckets })
           total_tokens: group.totals.total_tokens,
           billable_total_tokens: group.totals.billable_total_tokens ?? group.totals.total_tokens,
           total_cost_usd: group.totals.total_cost_usd || 0,
+          ...prioritySubsetOf(group.totals),
           conversation_count: group.totals.conversation_count,
         }),
       );
@@ -3716,7 +3752,43 @@ function initTotals() {
   };
 }
 
+// Observed-subset markers, same shape as the session sidecar's
+// long_context_* columns: "how much of the columns above came from requests on
+// the priority (Astra Fast) service tier". They annotate the existing columns
+// and are NEVER part of any sum — total_tokens stays
+// input + output + cache_creation + cache_read + reasoning_output. They are
+// omitted entirely when zero so no other provider's queue rows change.
+const PRIORITY_SUBSET_FIELDS = [
+  ["priority_input_tokens", "input_tokens"],
+  ["priority_cached_input_tokens", "cached_input_tokens"],
+  ["priority_cache_creation_input_tokens", "cache_creation_input_tokens"],
+  ["priority_output_tokens", "output_tokens"],
+  ["priority_reasoning_output_tokens", "reasoning_output_tokens"],
+];
+
+// The whole delta belongs to a priority request, so every base column it
+// carries is priority usage.
+function addPriorityUsage(target, delta) {
+  for (const [field, base] of PRIORITY_SUBSET_FIELDS) {
+    const value = Number(delta?.[base] || 0);
+    if (value > 0) target[field] = (Number(target[field]) || 0) + value;
+  }
+}
+
+function prioritySubsetOf(totals) {
+  const subset = {};
+  for (const [field] of PRIORITY_SUBSET_FIELDS) {
+    const value = Number(totals?.[field]) || 0;
+    if (value > 0) subset[field] = value;
+  }
+  return subset;
+}
+
 function addTotals(target, delta) {
+  for (const [field] of PRIORITY_SUBSET_FIELDS) {
+    const value = Number(delta?.[field]) || 0;
+    if (value > 0) target[field] = (Number(target[field]) || 0) + value;
+  }
   target.input_tokens += delta.input_tokens || 0;
   target.cached_input_tokens += delta.cached_input_tokens || 0;
   target.cache_creation_input_tokens += delta.cache_creation_input_tokens || 0;
@@ -3731,6 +3803,11 @@ function addTotals(target, delta) {
 }
 
 function subtractTotals(target, totals) {
+  for (const [field] of PRIORITY_SUBSET_FIELDS) {
+    const current = Number(target[field]) || 0;
+    if (current <= 0) continue;
+    target[field] = Math.max(0, current - (Number(totals?.[field]) || 0));
+  }
   target.input_tokens = Math.max(0, target.input_tokens - (totals.input_tokens || 0));
   target.cached_input_tokens = Math.max(
     0,
@@ -3764,7 +3841,7 @@ function subtractTotals(target, totals) {
 }
 
 function totalsKey(totals) {
-  return [
+  const base = [
     totals.input_tokens || 0,
     totals.cached_input_tokens || 0,
     totals.cache_creation_input_tokens || 0,
@@ -3775,6 +3852,10 @@ function totalsKey(totals) {
     totals.total_cost_usd || 0,
     totals.conversation_count || 0,
   ].join("|");
+  // Appended only when a priority subset exists, so buckets that never see the
+  // tier keep their previously persisted queuedKey and are not re-enqueued.
+  const priority = PRIORITY_SUBSET_FIELDS.map(([field]) => Number(totals[field]) || 0);
+  return priority.some((value) => value > 0) ? `${base}|p:${priority.join(",")}` : base;
 }
 
 function toUtcHalfHourStart(ts) {
