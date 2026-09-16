@@ -211,12 +211,23 @@ function computeRowCost(row) {
   const model = String(row?.model || "").toLowerCase();
   const usesOpenAILongContextTier =
     model === "gpt-5.6" || model.includes("gpt-5.6-sol") || model.includes("gpt-6-astra");
-  if (!usesOpenAILongContextTier) return baseCost;
+  // Only models whose curated entry carries an explicit Fast/priority rate get
+  // the tier premium. The other OpenAI tiers have no published priority price,
+  // and inventing one is worse than reporting Standard.
+  const priorityMultiplier = Number(pricing.priority_multiplier);
+  const hasPriorityRates = Number.isFinite(priorityMultiplier) && priorityMultiplier > 1;
+  if (!usesOpenAILongContextTier && !hasPriorityRates) return baseCost;
 
   const bounded = (value, total) => Math.min(
     Math.max(0, Number(value) || 0),
     Math.max(0, Number(total) || 0),
   );
+  // Both premium families below read "observed subset" columns: how much of the
+  // row's own token columns came from requests with a given property. They are
+  // annotations, never addends — total_tokens stays the sum of the base columns
+  // whether or not they are present, and a legacy row that omits them prices
+  // exactly as it did before.
+  //
   // The parser records only usage from requests whose cache-inclusive input
   // exceeded 272K. OpenAI prices the whole such request at 2x input and 1.5x
   // output, so add the premium over the standard-rate base exactly once.
@@ -230,14 +241,61 @@ function computeRowCost(row) {
   const longReasoning = reasoningIncludedInOutput
     ? 0
     : bounded(row.long_context_reasoning_output_tokens, row.reasoning_output_tokens);
-  const longContextPremium = (
+  const longContextPremium = usesOpenAILongContextTier ? (
     longInput * (pricing.input || 0) +
     longCached * (pricing.cache_read || 0) +
     longCacheWrite * (pricing.cache_write || 0) +
     0.5 * longOutput * (pricing.output || 0) +
     0.5 * longReasoning * (pricing.output || 0)
+  ) / 1_000_000 : 0;
+
+  if (!hasPriorityRates) return baseCost + longContextPremium;
+
+  // Astra Fast is a flat multiple of whichever context tier the request was on
+  // (short 10/1/12.5/50 -> 20/2/25/100; long 20/2/25/75 -> 40/4/50/150), so the
+  // tier multiplier and the long-context premium are orthogonal: a request that
+  // is both bills at the LONG rate times the multiplier, not standard times the
+  // multiplier. That needs the intersection, which is why the parser records
+  // priority_long_context_* alongside priority_*; without it (queue rows, which
+  // carry no context-length subset at all) the overlap is 0 and the premium
+  // falls back to the short-context multiple, matching the row's own base.
+  const priorityInput = bounded(row.priority_input_tokens, row.input_tokens);
+  const priorityCached = bounded(row.priority_cached_input_tokens, row.cached_input_tokens);
+  const priorityCacheWrite = bounded(
+    row.priority_cache_creation_input_tokens,
+    row.cache_creation_input_tokens,
+  );
+  const priorityOutput = bounded(row.priority_output_tokens, row.output_tokens);
+  const priorityReasoning = reasoningIncludedInOutput
+    ? 0
+    : bounded(row.priority_reasoning_output_tokens, row.reasoning_output_tokens);
+  const priorityBase = (
+    priorityInput * (pricing.input || 0) +
+    priorityCached * (pricing.cache_read || 0) +
+    priorityCacheWrite * (pricing.cache_write || 0) +
+    priorityOutput * (pricing.output || 0) +
+    priorityReasoning * (pricing.output || 0)
   ) / 1_000_000;
-  return baseCost + longContextPremium;
+
+  const priorityLong = usesOpenAILongContextTier ? (
+    bounded(row.priority_long_context_input_tokens, Math.min(priorityInput, longInput)) *
+      (pricing.input || 0) +
+    bounded(row.priority_long_context_cached_input_tokens, Math.min(priorityCached, longCached)) *
+      (pricing.cache_read || 0) +
+    bounded(
+      row.priority_long_context_cache_creation_input_tokens,
+      Math.min(priorityCacheWrite, longCacheWrite),
+    ) * (pricing.cache_write || 0) +
+    0.5 * bounded(row.priority_long_context_output_tokens, Math.min(priorityOutput, longOutput)) *
+      (pricing.output || 0) +
+    0.5 * bounded(
+      row.priority_long_context_reasoning_output_tokens,
+      Math.min(priorityReasoning, longReasoning),
+    ) * (pricing.output || 0)
+  ) / 1_000_000 : 0;
+
+  const priorityPremium = (priorityMultiplier - 1) * (priorityBase + priorityLong);
+  return baseCost + longContextPremium + priorityPremium;
 }
 
 // Backwards-compatible MODEL_PRICING export. Test at

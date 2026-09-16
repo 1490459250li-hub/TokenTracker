@@ -30,6 +30,7 @@ const {
   currentCodexModel,
   snapshotCodexModelAttributionState,
 } = require("./codex-model-attribution");
+const { readCodexServiceTier, isPriorityServiceTier } = require("./codex-service-tier");
 
 const DISCOVERY_FULL_AUDIT_INTERVAL_MS = 60 * 1000;
 const MAX_DISCOVERY_INVENTORIES = 32;
@@ -592,6 +593,11 @@ async function parseCodexRolloutFile(filePath, {
   const modelAttributionState = createCodexModelAttributionState(
     isResuming ? resumeState.modelAttributionState || { model } : {},
   );
+  // Codex writes thread_settings_applied immediately before the turn_context of
+  // the turn it applies to, and token_count rows carry no turn id, so each one
+  // belongs to the most recent preceding tier record. Sessions that never emit
+  // the event (most CLI sessions) stay null and are billed at Standard.
+  let serviceTier = isResuming ? resumeState.serviceTier || null : null;
   let provider = isResuming ? resumeState.provider || null : null;
   let cliVersion = isResuming ? resumeState.cliVersion || null : null;
   let forkedFromId = isResuming ? resumeState.forkedFromId || null : null;
@@ -650,9 +656,20 @@ async function parseCodexRolloutFile(filePath, {
         long_context_cache_creation_input_tokens: 0,
         long_context_output_tokens: 0,
         long_context_reasoning_output_tokens: 0,
+        priority_input_tokens: 0,
+        priority_cached_input_tokens: 0,
+        priority_cache_creation_input_tokens: 0,
+        priority_output_tokens: 0,
+        priority_reasoning_output_tokens: 0,
+        priority_long_context_input_tokens: 0,
+        priority_long_context_cached_input_tokens: 0,
+        priority_long_context_cache_creation_input_tokens: 0,
+        priority_long_context_output_tokens: 0,
+        priority_long_context_reasoning_output_tokens: 0,
         usage_events: 0,
         rerouted_usage_events: 0,
         long_context_usage_events: 0,
+        priority_usage_events: 0,
         selected_models: new Set(),
         reroute_reasons: new Set(),
       };
@@ -672,13 +689,36 @@ async function parseCodexRolloutFile(filePath, {
     // OpenAI applies the long-context tier to the whole request when its raw
     // (cache-inclusive) input exceeds 272K tokens. Preserve the exact subset
     // so pricing can be recomputed later without rescanning private logs.
-    if (Number(rawRequestUsage?.input_tokens || 0) > OPENAI_LONG_CONTEXT_INPUT_THRESHOLD) {
+    const isLongContext =
+      Number(rawRequestUsage?.input_tokens || 0) > OPENAI_LONG_CONTEXT_INPUT_THRESHOLD;
+    if (isLongContext) {
       row.long_context_usage_events += 1;
       row.long_context_input_tokens += delta.input_tokens;
       row.long_context_cached_input_tokens += delta.cached_input_tokens;
       row.long_context_cache_creation_input_tokens += delta.cache_creation_input_tokens;
       row.long_context_output_tokens += delta.output_tokens;
       row.long_context_reasoning_output_tokens += delta.reasoning_output_tokens;
+    }
+    // Astra Fast bills at a flat multiple of whichever context tier the request
+    // was on, so the priority premium multiplies the long-context premium
+    // instead of replacing it. The two subsets alone cannot say how much usage
+    // was on BOTH, so record the intersection explicitly — otherwise a long
+    // Fast request prices at 3x Standard input where it should be 4x.
+    if (isPriorityServiceTier(serviceTier)) {
+      row.priority_usage_events += 1;
+      row.priority_input_tokens += delta.input_tokens;
+      row.priority_cached_input_tokens += delta.cached_input_tokens;
+      row.priority_cache_creation_input_tokens += delta.cache_creation_input_tokens;
+      row.priority_output_tokens += delta.output_tokens;
+      row.priority_reasoning_output_tokens += delta.reasoning_output_tokens;
+      if (isLongContext) {
+        row.priority_long_context_input_tokens += delta.input_tokens;
+        row.priority_long_context_cached_input_tokens += delta.cached_input_tokens;
+        row.priority_long_context_cache_creation_input_tokens +=
+          delta.cache_creation_input_tokens;
+        row.priority_long_context_output_tokens += delta.output_tokens;
+        row.priority_long_context_reasoning_output_tokens += delta.reasoning_output_tokens;
+      }
     }
   }
 
@@ -936,6 +976,12 @@ async function parseCodexRolloutFile(filePath, {
       }
     }
 
+    const appliedServiceTier = readCodexServiceTier(obj);
+    if (appliedServiceTier) {
+      serviceTier = appliedServiceTier;
+      continue;
+    }
+
     if (obj.type === "turn_context") {
       const p = obj.payload || {};
       if (typeof p.cwd === "string") cwd = p.cwd;
@@ -1020,6 +1066,7 @@ async function parseCodexRolloutFile(filePath, {
       cwd,
       model,
       modelAttributionState: snapshotCodexModelAttributionState(modelAttributionState),
+      serviceTier,
       provider,
       cliVersion,
       forkedFromId,
