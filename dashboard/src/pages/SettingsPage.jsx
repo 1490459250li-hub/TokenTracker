@@ -1,8 +1,7 @@
 import React from "react";
-import { FlaskConical, Gauge, Globe, Monitor, Palette, Settings, UserRound } from "lucide-react";
+import { FlaskConical, Gauge, Globe, Palette, Settings } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { LimitsSettingsPanel } from "../components/LimitsSettingsPanel.jsx";
-import { AccountSection } from "../components/settings/AccountSection.jsx";
 import { AppearanceSection } from "../components/settings/AppearanceSection.jsx";
 import { LabsSection } from "../components/settings/LabsSection.jsx";
 import {
@@ -11,7 +10,6 @@ import {
   SettingsRow,
   ToggleSwitch,
 } from "../components/settings/Controls.jsx";
-import { MenuBarSection, NativeAppFooter } from "../components/settings/MenuBarSection.jsx";
 import { NetworkSection } from "../components/settings/NetworkSection.jsx";
 import { LIMIT_DISPLAY_MODES, useLimitsDisplayPrefs } from "../hooks/use-limits-display-prefs.js";
 import { useNativeSettings } from "../hooks/use-native-settings.js";
@@ -91,16 +89,7 @@ export function SettingsPage() {
       Icon: Palette,
       content: <AppearanceSection />,
     },
-    ...(nativeSettingsAvailable
-      ? [{
-          id: SETTINGS_SECTION_IDS.NATIVE_APP,
-          label: copy("settings.section.menubar"),
-          description: copy("settings.section.menubar.description"),
-          group: SETTINGS_GROUP_IDS.APP,
-          Icon: Monitor,
-          content: <MenuBarSection />,
-        }]
-      : []),
+    // App 与更新分区已移除（本 fork 无自动更新）
     ...(proxySettingsAvailable
       ? [{
           id: SETTINGS_SECTION_IDS.NETWORK,
@@ -111,14 +100,7 @@ export function SettingsPage() {
           content: <NetworkSection proxySettings={proxySettings} />,
         }]
       : []),
-    {
-      id: SETTINGS_SECTION_IDS.ACCOUNT,
-      label: copy("settings.section.account"),
-      description: copy("settings.section.account.description"),
-      group: SETTINGS_GROUP_IDS.PERSONAL,
-      Icon: UserRound,
-      content: <AccountSection />,
-    },
+    // 账户分区已移除（本 fork 无登录/云账号）
     {
       id: SETTINGS_SECTION_IDS.LIMITS,
       label: copy("settings.section.limits"),
