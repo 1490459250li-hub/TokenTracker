@@ -1,0 +1,23 @@
+{
+  "_meta": "TokenTracker API shim 配置示例。复制本文件为 ~/.tokentracker/api-shim/config.json 并填入你的 API key。key 只会发给对应上游，绝不会写入日志或上传。",
+  "host": "127.0.0.1",
+  "port": 17444,
+  "log_path": null,
+  "_log_path_note": "留空 = 默认 ~/.tokentracker/api-shim/usage.jsonl（sync 管线从这里读取）。如需自定义，填绝对路径并确保 TOKENTRACKER_API_SHIM_USAGE_LOG 指向同一文件。",
+  "upstreams": {
+    "deepseek": {
+      "_note": "调用方式：把客户端 base_url 设为 http://127.0.0.1:17444/deepseek 。DeepSeek 官方 base_url 是 https://api.deepseek.com（SDK 会自动拼 /chat/completions）",
+      "base_url": "https://api.deepseek.com",
+      "api_key": "sk-在此填入你的-DEEPSEEK-KEY",
+      "inject_include_usage": true,
+      "label": "DeepSeek API"
+    },
+    "mimo": {
+      "_note": "调用方式：base_url 设为 http://127.0.0.1:17444/mimo/v1 。MiMo 平台 OpenAI 兼容端点参考 codex-mimo-shim 的默认配置",
+      "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+      "api_key": "在此填入你的-MIMO-KEY",
+      "inject_include_usage": true,
+      "label": "Xiaomi MiMo API"
+    }
+  }
+}

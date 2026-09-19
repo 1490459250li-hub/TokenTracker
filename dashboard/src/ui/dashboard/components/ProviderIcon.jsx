@@ -378,6 +378,7 @@ const PROVIDER_ICON_MAP = {
   CURSOR: CursorIcon,
   DEEPSEEK: DeepSeekHarnessIcon,
   DSH: DeepSeekHarnessIcon,
+  "DEEPSEEK-API": DeepSeekHarnessIcon,
   DROID: DroidIcon,
   "EVERY-CODE": CodexIcon,
   GEMINI: GeminiIcon,
@@ -419,6 +420,7 @@ const PROVIDER_LOGO_MAP = {
   "KILO-CODE": "/brand-logos/kilo.svg",
   LMSTUDIO: "/brand-logos/lmstudio.svg",
   MIMO: "/brand-logos/mimo.svg",
+  "MIMO-API": "/brand-logos/mimo.svg",
   // oh-my-pi: multi-color brand mark (pi letterform + plugin connector). pi
   // itself publishes a white-only mark (pi.dev/logo.svg), so it gets the same
   // <img> luminance treatment as AnythingLLM in PROVIDER_LOGO_CLASS_MAP.

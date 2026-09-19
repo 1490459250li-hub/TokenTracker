@@ -135,6 +135,9 @@ const {
   totalsKey,
   claudeMessageDedupKey,
 } = require("../lib/rollout");
+const {
+  parseApiShimUsageIncremental,
+} = require("../lib/api-shim-source");
 const { computeClaudeGroundTruthBuckets } = require("../lib/claude-categorizer");
 const { createProgress, renderBar, formatNumber, formatBytes } = require("../lib/progress");
 const {
@@ -298,6 +301,8 @@ const AUTO_SYNC_SOURCES = new Set([
   "devin",
   "droid",
   "dsh",
+  "deepseek-api",
+  "mimo-api",
   "every-code",
   "gemini",
   "goose",
@@ -1631,6 +1636,18 @@ async function cmdSync(argv, context = {}) {
         } catch (err) {
           warnProviderParseFailure("DeepSeek Harness", err, opts);
         }
+      }
+    }
+
+    // ── API shim — local reverse-proxy accounting (deepseek-api / mimo-api) ──
+    // The api-shim (src/api-shim/server.js) records usage for direct
+    // OpenAI-compatible API calls that leave no local session logs.
+    let apiShimResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    if (sourceAllowed("deepseek-api") || sourceAllowed("mimo-api")) {
+      try {
+        apiShimResult = await parseApiShimUsageIncremental({ cursors, queuePath });
+      } catch (err) {
+        warnProviderParseFailure("API shim", err, opts);
       }
     }
 
@@ -3018,7 +3035,8 @@ async function cmdSync(argv, context = {}) {
       zedResult.recordsProcessed +
       gooseResult.recordsProcessed +
       dshResult.recordsProcessed +
-      droidResult.recordsProcessed;
+      droidResult.recordsProcessed +
+      apiShimResult.recordsProcessed;
     const totalBuckets =
       parseResult.bucketsQueued +
       openclawResult.bucketsQueued +
@@ -3058,7 +3076,8 @@ async function cmdSync(argv, context = {}) {
       zedResult.bucketsQueued +
       gooseResult.bucketsQueued +
       dshResult.bucketsQueued +
-      droidResult.bucketsQueued;
+      droidResult.bucketsQueued +
+      apiShimResult.bucketsQueued;
     const skipNoOpCursorCommit =
       opts.auto &&
       !isFullSourceScan &&
