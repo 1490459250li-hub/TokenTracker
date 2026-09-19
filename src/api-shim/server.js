@@ -193,6 +193,8 @@ function makeUsageScanner() {
   };
 }
 
+const CORS_HEADERS = { "access-control-allow-origin": "*" };
+
 class UsageLog {
   constructor(logPath) {
     this.logPath = logPath;
@@ -249,7 +251,7 @@ function forward(upstream, req, res, bodyBuffer, log) {
     },
     (upstreamRes) => {
       const started = Date.now();
-      res.writeHead(upstreamRes.statusCode || 502, { ...upstreamRes.headers, ...cors });
+      res.writeHead(upstreamRes.statusCode || 502, { ...upstreamRes.headers, ...CORS_HEADERS });
       const contentType = String(
         upstreamRes.headers["content-type"] || "",
       ).toLowerCase();
@@ -315,11 +317,10 @@ function createServer(config, log, reloadConfig) {
     }
   }
   rebuildPrefixes();
-  const cors = { "access-control-allow-origin": "*" };
-  return http.createServer(async (req, res) => {
+    return http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
-        ...cors,
+        ...CORS_HEADERS,
         "access-control-allow-methods": "GET, POST, OPTIONS",
         "access-control-allow-headers": "*",
       });
@@ -327,7 +328,7 @@ function createServer(config, log, reloadConfig) {
       return;
     }
     if (req.method === "GET" && req.url === "/healthz") {
-      res.writeHead(200, { "content-type": "application/json", ...cors });
+      res.writeHead(200, { "content-type": "application/json", ...CORS_HEADERS });
       res.end(
         JSON.stringify({
           ok: true,
@@ -349,14 +350,14 @@ function createServer(config, log, reloadConfig) {
       req.on("end", async () => {
         try {
           const fresh = await reloadConfig();
-          res.writeHead(200, { "content-type": "application/json", ...cors });
+          res.writeHead(200, { "content-type": "application/json", ...CORS_HEADERS });
           res.end(JSON.stringify({
             ok: true,
             upstreams: Object.keys(fresh.upstreams),
             log: fresh.log_path,
           }));
         } catch (err) {
-          res.writeHead(500, { "content-type": "application/json", ...cors });
+          res.writeHead(500, { "content-type": "application/json", ...CORS_HEADERS });
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
@@ -365,7 +366,7 @@ function createServer(config, log, reloadConfig) {
     const prefix = `/${req.url.split("/").filter(Boolean)[0] || ""}`;
     const upstream = upstreamPrefixes.get(prefix);
     if (!upstream) {
-      res.writeHead(404, { "content-type": "application/json", ...cors });
+      res.writeHead(404, { "content-type": "application/json", ...CORS_HEADERS });
       res.end(
         JSON.stringify({
           error: {

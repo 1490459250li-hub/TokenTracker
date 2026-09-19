@@ -243,7 +243,7 @@ export function ApiPlanCards({ apiPlans }) {
                 />
               </div>
               <div>
-                <label className="block text-xs text-oai-gray-500 dark:text-oai-gray-400 mb-1">默认次数上限</label>
+                <label className="block text-xs text-oai-gray-500 dark:text-oai-gray-400 mb-1">通用池次数上限</label>
                 <input
                   type="number" min="1" step="1"
                   className={inputClass}
@@ -252,6 +252,17 @@ export function ApiPlanCards({ apiPlans }) {
                 />
               </div>
             </div>
+            <div>
+              <label className="block text-xs text-oai-gray-500 dark:text-oai-gray-400 mb-1">
+                Flash-Lite 专属积分池次数上限（模型名含 flash-lite 走此池）
+              </label>
+              <input
+                type="number" min="1" step="1"
+                className={inputClass}
+                value={draft.sensenova?.flashliteCallsPerWindow ?? 1500}
+                onChange={(e) => updateDraft((d) => { d.sensenova = d.sensenova || {}; d.sensenova.flashliteCallsPerWindow = Number(e.target.value) || 1500; })}
+              />
+            </div>
             {snModels.length > 0 ? (
               <div className="space-y-1.5">
                 {snModels.map((m) => {
@@ -259,7 +270,9 @@ export function ApiPlanCards({ apiPlans }) {
                   return (
                     <div key={m.model}>
                       <div className="flex justify-between text-xs mb-0.5">
-                        <span className="truncate text-oai-gray-500 dark:text-oai-gray-400">{m.model}</span>
+                        <span className="truncate text-oai-gray-500 dark:text-oai-gray-400">
+                          {m.model} <span className="text-oai-gray-400 dark:text-oai-gray-500">（{m.pool === "flashlite" ? "Flash-Lite 专属池" : "通用池"}）</span>
+                        </span>
                         <span className={`font-medium ${pctColor(pct)}`}>{m.calls_in_window}/{m.limit} · {pct.toFixed(0)}%</span>
                       </div>
                       <div className="h-1.5 rounded-full bg-oai-gray-200 dark:bg-oai-gray-800 overflow-hidden">

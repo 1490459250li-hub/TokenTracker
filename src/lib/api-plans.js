@@ -72,7 +72,10 @@ async function readBudgets() {
     },
     sensenova: {
       windowHours: Number(budgets.sensenova?.windowHours) || SENSENOVA_DEFAULT_WINDOW_HOURS,
+      // 通用积分池（非 Flash-Lite 模型的调用次数上限）
       callsPerWindow: Number(budgets.sensenova?.callsPerWindow) || SENSENOVA_DEFAULT_CALLS,
+      // Flash-Lite 专属积分池（模型名含 flash-lite 的调用次数上限）
+      flashliteCallsPerWindow: Number(budgets.sensenova?.flashliteCallsPerWindow) || SENSENOVA_DEFAULT_CALLS,
       perModel: budgets.sensenova?.perModel && typeof budgets.sensenova.perModel === "object"
         ? budgets.sensenova.perModel
         : {},
@@ -175,25 +178,39 @@ function buildSenseNovaCard(events, budgets, nowMs) {
   for (const ev of events) {
     if (ev.source !== "sensenova-api") continue;
     const model = ev.model;
-    const entry = byModel[model] || { calls: 0, tokens: 0, last_ts: 0 };
+    const entry = byModel[model] || { calls: 0, tokens: 0, last_ts: 0, pool: null };
     if (ev.ts >= nowMs - windowMs) entry.calls += 1;
     entry.tokens += Number(ev.total_tokens) || 0;
     if (ev.ts > entry.last_ts) entry.last_ts = ev.ts;
+    // 归属积分池：模型名含 flash-lite 走专属池，其余走通用池
+    entry.pool = /flash-lite/i.test(model) ? "flashlite" : "general";
     byModel[model] = entry;
   }
-  const models = Object.entries(byModel).map(([model, entry]) => ({
-    model,
-    calls_in_window: entry.calls,
-    limit: Number(budgets.sensenova.perModel?.[model]) || budgets.sensenova.callsPerWindow,
-    tokens: entry.tokens,
-    last_activity_ts: entry.last_ts || null,
-    // 宠物血条：窗口内仍有调用 = 活跃
-    active_in_window: entry.last_ts >= nowMs - windowMs,
-  }));
+  const models = Object.entries(byModel).map(([model, entry]) => {
+    // 限额优先级：perModel 手动覆盖 > 所属池默认值
+    const manual = Number(budgets.sensenova.perModel?.[model]);
+    const poolLimit = entry.pool === "flashlite"
+      ? (Number(budgets.sensenova.flashliteCallsPerWindow) || SENSENOVA_DEFAULT_CALLS)
+      : (Number(budgets.sensenova.callsPerWindow) || SENSENOVA_DEFAULT_CALLS);
+    return {
+      model,
+      pool: entry.pool,
+      calls_in_window: entry.calls,
+      limit: Number.isFinite(manual) && manual > 0 ? manual : poolLimit,
+      tokens: entry.tokens,
+      last_activity_ts: entry.last_ts || null,
+      // 宠物血条：窗口内仍有调用 = 活跃
+      active_in_window: entry.last_ts >= nowMs - windowMs,
+    };
+  });
   return {
     configured: models.length > 0,
     window_hours: windowHours,
     unit: "calls",
+    pools: {
+      general: Number(budgets.sensenova.callsPerWindow) || SENSENOVA_DEFAULT_CALLS,
+      flashlite: Number(budgets.sensenova.flashliteCallsPerWindow) || SENSENOVA_DEFAULT_CALLS,
+    },
     models,
   };
 }
