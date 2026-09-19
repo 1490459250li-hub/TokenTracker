@@ -1,5 +1,7 @@
 import React, { useState, useCallback } from "react";
 import { motion } from "motion/react";
+import { useLoginModal } from "../../../contexts/LoginModalContext.jsx";
+import { useInsforgeAuth } from "../../../contexts/InsforgeAuthContext.jsx";
 import { ClawdAnimated } from "../../foundation/ClawdAnimated.jsx";
 import { useClawdState } from "../../../hooks/useClawdState.js";
 
@@ -27,8 +29,8 @@ const isNativeApp = (() => {
  * - Browser → Download App CTA
  */
 export function MacAppBanner({ todayTokens = 0, isSyncing = false, enterDelay = 0 }) {
-  const openLoginModal = () => {}; // no login in this fork
-  const cloudSignedIn = false; // no auth in this fork
+  const { openLoginModal } = useLoginModal();
+  const { signedIn: cloudSignedIn } = useInsforgeAuth();
   const clawdState = useClawdState({ todayTokens, isSyncing });
   const dismissKey = isNativeApp ? LOGIN_DISMISS_KEY : DISMISS_KEY;
 

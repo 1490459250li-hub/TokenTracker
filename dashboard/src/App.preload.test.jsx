@@ -62,9 +62,6 @@ vi.mock("./contexts/InsforgeAuthContext.jsx", () => ({
   useInsforgeAuth: () => insforgeMock,
 }));
 
-vi.mock("./hooks/use-cloud-usage-sync", () => ({
-  useCloudUsageSync: vi.fn(),
-}));
 
 vi.mock("./lib/mock-mode", () => ({
   isMockEnabled: () => false,

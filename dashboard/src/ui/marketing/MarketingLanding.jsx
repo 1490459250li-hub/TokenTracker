@@ -4,8 +4,6 @@ import { cn } from "../../lib/cn";
 import { getDashboardEntryPath } from "../../lib/host-mode";
 import { HeaderGithubStar } from "../components/HeaderGithubStar.jsx";
 import { InsforgeUserHeaderControls } from "../../components/InsforgeUserHeaderControls.jsx";
-import { useInsforgeAuth } from "../../contexts/InsforgeAuthContext.jsx";
-import { useLoginModal } from "../../contexts/LoginModalContext.jsx";
 import { STATUSPAGE_URL } from "../../lib/config";
 import { LV3_CSS_VARS } from "./v3/palette.js";
 import { PRIVACY_URL, REPO_URL } from "../../lib/config";
@@ -47,8 +45,9 @@ export function MarketingLanding({
   const isLocalMode =
     typeof window !== "undefined" &&
     (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
-  const { signedIn, loading: authLoading } = useInsforgeAuth();
-  const { openLoginModal } = useLoginModal();
+  const signedIn = false; // no auth in this fork
+  const authLoading = false;
+  const openLoginModal = () => {}; // no login in this fork
 
   // Community stats pruned in this fork (leaderboard removed).
   const stats = { status: "unavailable", top: [], totalEntries: 0, tokenFloor: 0 };

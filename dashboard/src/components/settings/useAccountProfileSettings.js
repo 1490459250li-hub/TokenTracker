@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useInsforgeAuth } from "../../contexts/InsforgeAuthContext.jsx";
 import { resolveAuthAccessTokenWithRetry } from "../../lib/auth-token";
 import { getPublicVisibility, setPublicVisibility } from "../../lib/api";
 import { runCloudUsageSyncNow } from "../../lib/cloud-sync";
@@ -266,7 +265,8 @@ function useGithubActions(state, mutateProfile) {
 }
 
 export function useAccountProfileSettings() {
-  const auth = useInsforgeAuth();
+  // InsForge auth removed in this fork — account section is inert/local-only.
+  const auth = { enabled: false, signedIn: false, loading: false, user: null, getAccessToken: undefined, refreshDisplayName: undefined };
   const state = useProfileState(auth.user);
   const cloudSync = useCloudSyncControl(auth.getAccessToken, auth.enabled, auth.signedIn);
   useProfileLoad(auth.getAccessToken, auth.signedIn, state.loadSetters);

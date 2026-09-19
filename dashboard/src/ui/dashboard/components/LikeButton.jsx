@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Heart } from "lucide-react";
 import { copy } from "../../../lib/copy";
 import { getProfileLikes, setProfileLike } from "../../../lib/api";
-import { useInsforgeAuth } from "../../../contexts/InsforgeAuthContext";
 
 // Per-browser anonymous like identity. The edge validates anon_id against a UUID
 // regex, so it must be a real v4 UUID. crypto.randomUUID needs a secure context
@@ -43,7 +42,8 @@ function getAnonId() {
 }
 
 export function LikeButton({ userId }) {
-  const { signedIn, getAccessToken } = useInsforgeAuth();
+  const signedIn = false; // no auth in this fork
+  const getAccessToken = undefined;
   const [isLiked, setIsLiked] = useState(false);
   const [likesCount, setLikesCount] = useState(0);
   const [ready, setReady] = useState(false);

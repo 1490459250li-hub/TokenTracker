@@ -2754,22 +2754,7 @@ function createLocalApiHandler({ queuePath }) {
       return true;
     }
 
-    // --- telemetry preference (anonymous analytics opt-out mirror) ---
-    // The dashboard's analytics init on localhost / native-app surfaces asks
-    // this before sending anything, so TOKENTRACKER_NO_TELEMETRY /
-    // DO_NOT_TRACK / config.json `"telemetry": false` turn off dashboard
-    // analytics together with the daily heartbeat (src/lib/telemetry.js).
-    if (p === "/functions/tokentracker-telemetry-pref") {
-      const { isTelemetryDisabled } = require("./telemetry");
-      let config = {};
-      try {
-        config = JSON.parse(fs.readFileSync(path.join(path.dirname(qp), "config.json"), "utf8")) || {};
-      } catch {
-        config = {};
-      }
-      json(res, { disabled: isTelemetryDisabled({ env: process.env, config }) });
-      return true;
-    }
+    // telemetry-pref endpoint removed in this fork (no telemetry).
 
     // --- machine-id (stable per-machine device identity for cloud sync) ---
     // The dashboard reads this before issuing a cloud device token so the

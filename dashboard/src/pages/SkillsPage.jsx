@@ -50,7 +50,6 @@ import {
   updateSkills,
 } from "../lib/skills-api";
 import { mergeSkillInventories } from "../lib/skills-inventory";
-import { useInsforgeAuth } from "../contexts/InsforgeAuthContext.jsx";
 import { getCloudSyncEnabled, getCurrentDeviceId } from "../lib/cloud-sync-prefs";
 
 const DEFAULT_TARGETS = ["claude", "codex"];
@@ -834,9 +833,9 @@ function readTabFromUrl() {
 }
 
 export function SkillsPage() {
-  const auth = useInsforgeAuth() || {};
-  const signedIn = Boolean(auth.signedIn);
-  const getAccessToken = auth.getAccessToken;
+  // InsForge auth removed in this fork — always local/anonymous.
+  const signedIn = false;
+  const getAccessToken = undefined;
   const [tab, setTab] = useState(readTabFromUrl);
   const [installedData, setInstalledData] = useState({ skills: [], targets: [] });
   const [discoverData, setDiscoverData] = useState([]);

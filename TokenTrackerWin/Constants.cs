@@ -20,6 +20,10 @@ internal static class Constants
     public const string AppDisplayName = "TokenTracker";
     public const string GitHubUrl = "https://github.com/xiufengsun/TokenTracker";
 
+    /// <summary>Static app version (kept in sync with the csproj Version; the
+    /// update checker that previously resolved this dynamically was removed).</summary>
+    public const string AppVersion = "0.97.2";
+
     /// <summary>HKCU Run-key value name used for launch-at-startup.</summary>
     public const string StartupRegistryValueName = "TokenTracker";
 }

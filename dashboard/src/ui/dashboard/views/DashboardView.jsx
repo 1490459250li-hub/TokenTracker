@@ -25,7 +25,6 @@ import { WidgetOnboardingCard } from "../components/WidgetOnboardingCard.jsx";
 import { IslandOnboardingCard } from "../components/IslandOnboardingCard.jsx";
 import { QualityPerDollarCard } from "../components/QualityPerDollarCard.jsx";
 import { SessionInsightsCard } from "../components/SessionInsightsCard.jsx";
-import { LoginCard } from "../../../components/LoginCard.jsx";
 import { DashboardSkeleton } from "../../../components/DashboardSkeleton.jsx";
 import { cn } from "../../../lib/cn";
 import { LogoCarousel } from "../../marketing/LogoCarousel.jsx";
@@ -114,8 +113,6 @@ export function DashboardView(props) {
     copy,
     onOpenShare,
     screenshotMode,
-    showExpiredGate,
-    showAuthGate,
     identityDisplayName,
     identityStartDate,
     activeDays,
@@ -491,40 +488,10 @@ export function DashboardView(props) {
         footer={!screenshotMode ? footer : null}
         className={screenshotMode ? "screenshot-mode" : ""}
       >
-        {showAuthGate && (
-          <FullPageGateLayout
-            title={copy("dashboard.auth_gate.hero_title")}
-            desc={copy("dashboard.auth_gate.desc")}
-            copy={copy}
-            loginCard={
-              <LoginCard
-                title={copy("dashboard.auth_gate.title")}
-                subtitle={copy("dashboard.auth_gate.subtitle")}
-                hideLogo={true}
-                className="bg-transparent rounded-xl"
-              />
-            }
-          />
-        )}
-        {showExpiredGate && (
-          <FullPageGateLayout
-            title={copy("dashboard.expired_gate.hero_title")}
-            desc={copy("dashboard.expired_gate.desc")}
-            copy={copy}
-            loginCard={
-              <LoginCard
-                title={copy("dashboard.expired_gate.title")}
-                subtitle={copy("dashboard.expired_gate.subtitle")}
-                hideLogo={true}
-                className="bg-transparent rounded-xl"
-              />
-            }
-          />
-        )}
-        {!showAuthGate && !showExpiredGate && initialDashboardLoading && (
+        {initialDashboardLoading && (
           <DashboardSkeleton />
         )}
-        {!showAuthGate && !showExpiredGate && !initialDashboardLoading && (
+        {!initialDashboardLoading && (
           <>
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
               <div className="lg:col-span-4 flex flex-col gap-4 min-w-0 order-2 lg:order-1">

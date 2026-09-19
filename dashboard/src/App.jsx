@@ -1,14 +1,11 @@
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
-import { Navigate, useLocation } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 import { ErrorBoundary } from "./components/ErrorBoundary.jsx";
 import { useLocale } from "./hooks/useLocale.js";
 import { ThemeProvider } from "./ui/foundation/ThemeProvider.jsx";
-import { useInsforgeAuth } from "./contexts/InsforgeAuthContext.jsx";
-import { LoginModalProvider } from "./contexts/LoginModalContext.jsx";
 import { getBackendBaseUrl } from "./lib/config";
 import { isMockEnabled } from "./lib/mock-mode";
 import { isScreenshotModeEnabled } from "./lib/screenshot-mode";
-import { useCloudUsageSync } from "./hooks/use-cloud-usage-sync";
 import { AppLayout } from "./ui/components/Sidebar.jsx";
 import { ToastProvider } from "./ui/components/Toast.jsx";
 import {
@@ -33,23 +30,11 @@ const SpeedInsights = lazy(() =>
     .then((m) => ({ default: m.SpeedInsights }))
     .catch(() => ({ default: nullComponent })),
 );
-const LoginModal = lazy(() =>
-  import("./components/LoginModal.jsx")
-    .then((m) => ({ default: m.LoginModal }))
-    .catch(() => ({ default: nullComponent })),
-);
 const CommandPalette = lazy(() =>
   import("./ui/dashboard/components/CommandPalette.jsx")
     .then((m) => ({ default: m.CommandPalette }))
     .catch(() => ({ default: nullComponent })),
 );
-// NativeAuthCallbackPage must be eager-imported: its module-level code
-// captures the OAuth `insforge_code` query param synchronously at app
-// boot, BEFORE the InsForge SDK's detectAuthCallback() strips it. Lazy
-// loading delays the module until route render, by which point the
-// param has already been removed — the page then falls through to the
-// "Sign-in incomplete" failure state.
-import { NativeAuthCallbackPage } from "./pages/NativeAuthCallbackPage.jsx";
 
 // Pages are lazy-loaded so each route ships in its own chunk; keeps the
 // initial main bundle small (was 1.9 MB before splitting, all 11 pages
@@ -66,13 +51,6 @@ const LandingPage = lazy(() =>
 const LimitsPage = lazy(() =>
   import("./pages/LimitsPage.jsx").then((m) => ({ default: m.LimitsPage })),
 );
-const LoginPage = lazy(() =>
-  import("./pages/LoginPage.jsx").then((m) => ({ default: m.LoginPage })),
-);
-const ResetPasswordPage = lazy(() =>
-  import("./pages/ResetPasswordPage.jsx").then((m) => ({ default: m.ResetPasswordPage })),
-);
-const DevicePage = lazy(() => import("./pages/DevicePage.jsx"));
 const WrappedPage = lazy(() => import("./pages/WrappedPage.jsx"));
 const SettingsPage = lazy(() =>
   import("./pages/SettingsPage.jsx").then((m) => ({ default: m.SettingsPage })),
@@ -96,8 +74,8 @@ export default function App() {
   // across the tree — without unmounting lazy-loaded pages.
   const { resolvedLocale } = useLocale();
   const location = useLocation();
-  const insforge = useInsforgeAuth();
-  useCloudUsageSync();
+  // InsForge auth removed in this fork (local-only, no login).
+  // Cloud usage sync removed in this fork (local-only).
   const dashboardMainContentVisibleRef = useRef(false);
   const dashboardResourcePreloadStartedRef = useRef(false);
   const mockEnabled = isMockEnabled();
@@ -127,7 +105,7 @@ export default function App() {
   // Standalone shareable profile page: /u/:userId (public, anonymous-visible).
   const profileUserId = null; // Leaderboard profile pruned in this fork
 
-  const cloudAuthSignedIn = Boolean(insforge.enabled && insforge.signedIn);
+  const cloudAuthSignedIn = false; // no cloud auth in this fork
   const signedIn = isLocalMode || cloudAuthSignedIn;
   const sessionSoftExpired = false;
   const baseUrl = getBackendBaseUrl();
@@ -147,14 +125,7 @@ export default function App() {
     isDashboardDefaultPath,
   ]);
 
-  const authObject = useMemo(() => {
-    if (!insforge.enabled || !cloudAuthSignedIn) return null;
-    return {
-      getAccessToken: () => insforge.getAccessToken(),
-      name: insforge.displayName || "",
-      userId: insforge.user?.id || null,
-    };
-  }, [cloudAuthSignedIn, insforge]);
+  const authObject = null; // no cloud auth in this fork
 
   let gate = isLocalMode || mockEnabled || screenshotMode ? "dashboard" : "landing";
   if (normalizedPath === "/landing") gate = "landing";
@@ -212,40 +183,10 @@ export default function App() {
   // CLI :7680 to fall back to, so dashboard / settings / etc. require a
   // signed-in user. publicMode (shared link) and the loading state are
   // exceptions that handle themselves.
-  const publicHostNeedsLogin =
-    !isLocalMode &&
-    !cloudAuthSignedIn &&
-    !publicMode &&
-    !insforge.loading &&
-    gate === "dashboard" &&
-    // Public-readable routes must stay reachable for signed-out visitors:
-    // /leaderboard and /u/:userId profiles are deliberate no-auth reads
-    // (see api.ts getLeaderboard + LeaderboardProfilePage). Without these
-    // exclusions the gate would bounce anonymous share-link traffic to /login.
-    !isLeaderboardPath &&
-    !profileUserId &&
-    normalizedPath !== "/login" &&
-    normalizedPath !== "/reset-password" &&
-    normalizedPath !== "/landing" &&
-    normalizedPath !== "/auth/callback" &&
-    normalizedPath !== "/auth/native-callback";
-  if (publicHostNeedsLogin) {
-    return <Navigate to="/login" replace />;
-  }
+  // Login gate removed in this fork (local-only build, no auth).
 
   let content = null;
-  if (normalizedPath === "/auth/callback" || normalizedPath === "/auth/native-callback") {
-    content = <NativeAuthCallbackPage />;
-  } else if (normalizedPath === "/login") {
-    content = <LoginPage />;
-  } else if (normalizedPath === "/reset-password") {
-    content = <ResetPasswordPage />;
-  } else if (normalizedPath === "/device") {
-    // Headless-CLI device-flow approval page. Standalone (no sidebar) so
-    // unsigned visitors hit the embedded sign-in CTA without sidebar nav
-    // confusion. Auth check happens inside DevicePage itself.
-    content = <DevicePage />;
-  } else if (normalizedPath === "/wrapped") {
+  if (normalizedPath === "/wrapped") {
     // Year-end Wrapped page. Reads from /functions/tokentracker-wrapped
     // (provided by the local CLI server) — no auth required.
     content = <WrappedPage />;
@@ -259,7 +200,7 @@ export default function App() {
         auth={authObject}
         signedIn={signedIn}
         sessionSoftExpired={sessionSoftExpired}
-        signOut={() => (insforge.enabled ? insforge.signOut() : Promise.resolve())}
+        signOut={() => Promise.resolve()} // no auth in this fork
         publicMode={publicMode}
         publicToken={publicToken}
         signInUrl="/login"
@@ -278,15 +219,12 @@ export default function App() {
     <ErrorBoundary>
       <ThemeProvider>
         <ToastProvider>
-          <LoginModalProvider>
             <Suspense fallback={null}>{content}</Suspense>
             <Suspense fallback={null}>
               {showSidebar ? <CommandPalette /> : null}
-              <LoginModal />
               <Analytics />
               <SpeedInsights />
             </Suspense>
-          </LoginModalProvider>
         </ToastProvider>
       </ThemeProvider>
     </ErrorBoundary>

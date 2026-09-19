@@ -1,6 +1,5 @@
 import React from "react";
 import { Pencil } from "lucide-react";
-import { useLoginModal } from "../../contexts/LoginModalContext.jsx";
 import { copy } from "../../lib/copy";
 import { SectionCard, ToggleSwitch } from "./Controls.jsx";
 
@@ -246,7 +245,7 @@ function GithubProfileField({ github }) {
 }
 
 export function SignedOutAccountSection() {
-  const { openLoginModal } = useLoginModal();
+  const openLoginModal = () => {}; // no login in this fork
   return (
     <SectionCard title={copy("settings.section.account")}>
       <div className="flex items-center justify-between gap-4 py-3">

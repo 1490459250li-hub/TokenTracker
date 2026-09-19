@@ -1348,10 +1348,9 @@ export function DashboardPage({
   const headerRight = null;
   const footerLeftContent = null;
 
-  const showExpiredGate = sessionSoftExpired && !publicMode;
-  // 使用上面定义的 isLocalMode
-  const requireAuthGate = !signedIn && !mockEnabled && !sessionSoftExpired && !isLocalMode;
-  const showAuthGate = requireAuthGate && !publicMode;
+  // Auth gates removed in this fork (local-only, no login).
+  const showExpiredGate = false;
+  const showAuthGate = false;
 
   useEffect(() => {
     if (showExpiredGate || showAuthGate || initialDashboardLoading) return;
