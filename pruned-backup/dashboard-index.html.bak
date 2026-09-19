@@ -123,7 +123,7 @@
               "price": "0",
               "priceCurrency": "USD"
             },
-            "description": "Local-first AI coding usage tracker for 39 tools, with a desktop pet, four widgets, native macOS and Windows apps, accurate cross-provider deduplication, and no prompt collection."
+            "description": "Local-first AI coding usage tracker for 39 tools, with a desktop pet, four widgets, achievements, native macOS and Windows apps, accurate cross-provider deduplication, and no prompt collection."
           },
           {
             "@type": "WebSite",
@@ -149,7 +149,8 @@
               {
                 "@type": "ListItem",
                 "position": 2,
-                "name": "Leaderboard"
+                "name": "Leaderboard",
+                "item": "https://www.tokentracker.cc/leaderboard"
               },
               {
                 "@type": "ListItem",
@@ -260,7 +261,7 @@
                 "name": "Does Token Tracker work offline?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Yes. Token Tracker is local-first. All parsing, aggregation, and dashboard rendering happens on your machine. Cloud sync is optional."
+                  "text": "Yes. Token Tracker is local-first. All parsing, aggregation, and dashboard rendering happens on your machine. Cloud sync is optional and powers only the public leaderboard."
                 }
               }
             ]
@@ -276,7 +277,7 @@
         Token Tracker is a free, open-source, local-first dashboard that automatically tracks and monitors token usage
         and cost across 39 AI coding tools — including Claude Code, OpenAI Codex, AStudio, Cursor, Gemini CLI, LM Studio, and Unsloth Studio. A desktop pet
         reacts to real token activity, four desktop widgets
-        keep usage visible, turn coding history into progress. Native macOS and Windows apps
+        keep usage visible, and achievements turn coding history into progress. Native macOS and Windows apps
         sit on top of accurate cross-provider deduplication. Token counts only — never prompts or conversations.
       </p>
 
@@ -308,7 +309,7 @@
         <li><strong>Skills browser</strong> — discover and install agent skills from the open ecosystem.</li>
         <li><strong>Native desktop apps</strong> — a macOS menu bar app and Windows system tray app.</li>
       </ul>
-      <p><em>Privacy by design</em>: token counts only, never prompts or conversation content. Local-first; cloud sync is optional.</p>
+      <p><em>Privacy by design</em>: token counts only, never prompts or conversation content. Local-first; cloud sync is optional and powers only the public leaderboard.</p>
 
       <h2>Supported AI coding tools (39)</h2>
       <p>
@@ -377,7 +378,8 @@
         (<code>src/lib/rollout.js</code>) normalizes provider-specific log formats into a unified schema: half-hour
         UTC buckets keyed by <code>(source, model, hour_start)</code>. Aggregated buckets are written to
         <code>queue.jsonl</code> and served from a local HTTP API on port 7680. The React dashboard reads
-        from those endpoints; cloud sync (optional) uploads bucketed counts to InsForge.
+        from those endpoints; cloud sync (optional) uploads bucketed counts to InsForge for the public
+        leaderboard.
       </p>
 
       <h2>Frequently asked questions</h2>
@@ -400,11 +402,12 @@
       <p>Token Tracker is an AI token usage and cost tracker: install it with <code>npx tokentracker-cli</code>, and it monitors token consumption and spend across all 39 tools in one dashboard, with per-model pricing across 2,200+ models so you can see cost by model, project, and time window without manual tracking.</p>
 
       <h3>Does Token Tracker work offline?</h3>
-      <p>Yes. Token Tracker is local-first. All parsing, aggregation, and dashboard rendering happen on your machine. Cloud sync is optional.</p>
+      <p>Yes. Token Tracker is local-first. All parsing, aggregation, and dashboard rendering happen on your machine. Cloud sync is optional and powers only the public leaderboard.</p>
 
       <h2>Resources</h2>
       <ul>
         <li><a href="https://www.tokentracker.cc/">Homepage and install instructions</a></li>
+        <li><a href="https://www.tokentracker.cc/leaderboard">AI coding token usage leaderboard — Claude, Codex, Cursor</a></li>
         <li><a href="https://www.tokentracker.cc/ip-check">Claude IP check — exit IP reputation &amp; risk (纯净度) score</a></li>
         <li><a href="https://www.npmjs.com/package/tokentracker-cli">npm: tokentracker-cli</a></li>
         <li><a href="https://github.com/xiufengsun/TokenTracker">GitHub: xiufengsun/TokenTracker</a></li>
