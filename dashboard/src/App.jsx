@@ -5,17 +5,15 @@ import { useLocale } from "./hooks/useLocale.js";
 import { ThemeProvider } from "./ui/foundation/ThemeProvider.jsx";
 import { useInsforgeAuth } from "./contexts/InsforgeAuthContext.jsx";
 import { LoginModalProvider } from "./contexts/LoginModalContext.jsx";
-import { getBackendBaseUrl, getLeaderboardBaseUrl } from "./lib/config";
+import { getBackendBaseUrl } from "./lib/config";
 import { isMockEnabled } from "./lib/mock-mode";
 import { isScreenshotModeEnabled } from "./lib/screenshot-mode";
 import { useCloudUsageSync } from "./hooks/use-cloud-usage-sync";
 import { AppLayout } from "./ui/components/Sidebar.jsx";
 import { ToastProvider } from "./ui/components/Toast.jsx";
 import {
-  getLeaderboardPreloadContextKey,
   markDashboardMainContentVisible,
   preloadDashboardPageResources,
-  preloadLeaderboardDefaultState,
 } from "./lib/dashboard-preload.js";
 // Telemetry beacons and modal/palette UI are not first-paint critical; lazy
 // loading keeps them out of the eager entry chunk (which the anonymous share
@@ -62,15 +60,8 @@ const DashboardPage = lazy(() =>
 );
 const IpCheckPage = lazy(() => import("./pages/IpCheckPage.jsx"));
 const ServiceStatusPage = lazy(() => import("./pages/ServiceStatusPage.jsx"));
-const AchievementsPage = lazy(() => import("./pages/AchievementsPage.jsx"));
 const LandingPage = lazy(() =>
   import("./pages/LandingPage.jsx").then((m) => ({ default: m.LandingPage })),
-);
-const LeaderboardPage = lazy(() =>
-  import("./pages/LeaderboardPage.jsx").then((m) => ({ default: m.LeaderboardPage })),
-);
-const LeaderboardProfilePage = lazy(() =>
-  import("./pages/LeaderboardProfilePage.jsx").then((m) => ({ default: m.LeaderboardProfilePage })),
 );
 const LimitsPage = lazy(() =>
   import("./pages/LimitsPage.jsx").then((m) => ({ default: m.LimitsPage })),
@@ -109,7 +100,6 @@ export default function App() {
   useCloudUsageSync();
   const dashboardMainContentVisibleRef = useRef(false);
   const dashboardResourcePreloadStartedRef = useRef(false);
-  const leaderboardStatePreloadContextKeysRef = useRef(new Set());
   const mockEnabled = isMockEnabled();
   const screenshotMode = useMemo(() => {
     if (typeof window === "undefined") return false;
@@ -133,50 +123,15 @@ export default function App() {
 
   const normalizedPath = pathname.replace(/\/+$/, "") || "/";
   const isDashboardDefaultPath = normalizedPath === "/" || normalizedPath === "/dashboard";
-  const isLeaderboardPath = normalizedPath === "/leaderboard";
+  const isLeaderboardPath = false; // Leaderboard pruned in this fork
   // Standalone shareable profile page: /u/:userId (public, anonymous-visible).
-  const profileMatch = normalizedPath.match(/^\/u\/([^/]+)$/i);
-  const profileUserId = profileMatch ? profileMatch[1] : null;
+  const profileUserId = null; // Leaderboard profile pruned in this fork
 
   const cloudAuthSignedIn = Boolean(insforge.enabled && insforge.signedIn);
   const signedIn = isLocalMode || cloudAuthSignedIn;
   const sessionSoftExpired = false;
   const baseUrl = getBackendBaseUrl();
   const isAuthGateTriggered = !signedIn && !mockEnabled && !isLocalMode;
-  const leaderboardAccessMode = mockEnabled
-    ? "mock"
-    : insforge.loading
-      ? "unavailable"
-      : cloudAuthSignedIn
-        ? "cloud"
-        : signedIn
-          ? "local"
-          : "unavailable";
-
-  const tryPreloadLeaderboardDefaultState = useCallback(() => {
-    if (!dashboardMainContentVisibleRef.current) return;
-    if (!mockEnabled && insforge.loading) return;
-    if (!mockEnabled && !signedIn) return;
-    const preloadOptions = {
-      accessMode: leaderboardAccessMode,
-      baseUrl: getLeaderboardBaseUrl(),
-      mockEnabled,
-      signedIn,
-      authLoading: Boolean(insforge.loading),
-      userId: cloudAuthSignedIn ? insforge.user?.id || null : null,
-    };
-    const contextKey = getLeaderboardPreloadContextKey(preloadOptions);
-    if (leaderboardStatePreloadContextKeysRef.current.has(contextKey)) return;
-    leaderboardStatePreloadContextKeysRef.current.add(contextKey);
-    void preloadLeaderboardDefaultState(preloadOptions);
-  }, [
-    cloudAuthSignedIn,
-    insforge.loading,
-    insforge.user?.id,
-    leaderboardAccessMode,
-    mockEnabled,
-    signedIn,
-  ]);
 
   const handleDashboardMainContentVisible = useCallback(() => {
     if (!isDashboardDefaultPath) return;
@@ -188,15 +143,9 @@ export default function App() {
       dashboardResourcePreloadStartedRef.current = true;
       void preloadDashboardPageResources();
     }
-    tryPreloadLeaderboardDefaultState();
   }, [
     isDashboardDefaultPath,
-    tryPreloadLeaderboardDefaultState,
   ]);
-
-  useEffect(() => {
-    tryPreloadLeaderboardDefaultState();
-  }, [tryPreloadLeaderboardDefaultState]);
 
   const authObject = useMemo(() => {
     if (!insforge.enabled || !cloudAuthSignedIn) return null;
@@ -225,11 +174,7 @@ export default function App() {
   if (isLimitsPath || isSettingsPath || isSkillsPath || isSessionsPath || isWidgetsPath || isPetPath || isIpCheckPath || isServiceStatusPath || isAchievementsPath) gate = "dashboard";
 
   let PageComponent = DashboardPage;
-  if (profileUserId) {
-    PageComponent = LeaderboardProfilePage;
-  } else if (normalizedPath === "/leaderboard") {
-    PageComponent = LeaderboardPage;
-  } else if (isLimitsPath) {
+  if (isLimitsPath) {
     PageComponent = LimitsPage;
   } else if (isSettingsPath) {
     PageComponent = SettingsPage;
@@ -245,8 +190,6 @@ export default function App() {
     PageComponent = IpCheckPage;
   } else if (isServiceStatusPath) {
     PageComponent = ServiceStatusPage;
-  } else if (isAchievementsPath) {
-    PageComponent = AchievementsPage;
   }
 
   const showSidebar =
@@ -319,7 +262,6 @@ export default function App() {
         signOut={() => (insforge.enabled ? insforge.signOut() : Promise.resolve())}
         publicMode={publicMode}
         publicToken={publicToken}
-        userId={profileUserId}
         signInUrl="/login"
         signUpUrl="/login"
         onMainContentVisible={handleDashboardMainContentVisible}

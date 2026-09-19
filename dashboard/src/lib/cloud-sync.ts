@@ -5,7 +5,6 @@ import {
   getCloudUsageReady,
   getLastCloudSyncTs,
   getStoredDeviceSession,
-  emitCloudLeaderboardRefreshed,
   setLastCloudSyncTs,
   setStoredDeviceSession,
   type CloudDeviceSession,
@@ -29,36 +28,6 @@ function shouldRotateStoredDeviceSession(
   return issuedAtMs + DEVICE_TOKEN_ROTATE_AFTER_MS <= nowMs;
 }
 
-async function triggerLeaderboardRefresh(
-  accessToken: string,
-  source: "cloud-sync-auto" | "cloud-sync-now",
-): Promise<boolean> {
-  const baseUrl = getInsforgeRemoteUrl();
-  if (!isRemoteHttpBase(baseUrl) || !accessToken) return false;
-  const root = baseUrl.replace(/\/$/, "");
-  const anon = getInsforgeAnonKey();
-  const headers: Record<string, string> = {
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${accessToken}`,
-  };
-  if (anon) headers.apikey = anon;
-  // Per-sync refresh is week-only. Month/Total scan tens of thousands of
-  // hourly rows each call and burn InsForge Egress (~5 MB per full refresh
-  // every 5 min per active user blew through the 5 GB plan). Server-side
-  // schedules own the slower-moving month/total snapshots.
-  try {
-    const response = await fetch(`${root}/functions/tokentracker-leaderboard-refresh`, {
-      method: "POST",
-      headers,
-      cache: "no-store",
-      body: JSON.stringify({ period: "week", source }),
-    });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Resolve the stable per-MACHINE id and human-readable system name served by
@@ -233,9 +202,7 @@ export async function runCloudUsageSyncIfDue(getAccessToken: () => Promise<strin
   });
   if (!accessToken) return;
   setLastCloudSyncTs(Date.now());
-  if (await triggerLeaderboardRefresh(accessToken, "cloud-sync-auto")) {
-    emitCloudLeaderboardRefreshed();
-  }
+  // Leaderboard refresh pruned in this fork.
 }
 
 /** 用户打开「同步到云端」后立即尝试一次（忽略节流） */
@@ -243,7 +210,5 @@ export async function runCloudUsageSyncNow(getAccessToken: () => Promise<string 
   const accessToken = await syncCloudUsageWithRecovery(getAccessToken, { drain: true });
   if (!accessToken) return;
   setLastCloudSyncTs(Date.now());
-  if (await triggerLeaderboardRefresh(accessToken, "cloud-sync-now")) {
-    emitCloudLeaderboardRefreshed();
-  }
+  // Leaderboard refresh pruned in this fork.
 }

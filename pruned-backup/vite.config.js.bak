@@ -318,6 +318,61 @@ const ROUTE_SEO_PAGES = [
       </p>
     </main>`,
   },
+  {
+    file: "leaderboard.html",
+    url: "https://www.tokentracker.cc/leaderboard",
+    title: "AI Coding Token Usage Leaderboard — Claude, Codex, Cursor",
+    description:
+      "Public Token Tracker leaderboard ranking AI coding token usage across Claude Code, Codex, Cursor, Gemini and 27 tools. Opt-in, privacy-first — token counts only, never prompts.",
+    jsonld: {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "Organization",
+          "@id": "https://www.tokentracker.cc/#organization",
+          name: "Token Tracker",
+          url: "https://www.tokentracker.cc/",
+        },
+        {
+          "@type": "WebPage",
+          "@id": "https://www.tokentracker.cc/leaderboard#webpage",
+          url: "https://www.tokentracker.cc/leaderboard",
+          name: "AI Coding Token Usage Leaderboard",
+          isPartOf: { "@id": "https://www.tokentracker.cc/#website" },
+          description:
+            "Public leaderboard ranking opt-in AI coding token usage across Claude Code, Codex, Cursor, Gemini and 27 tools.",
+        },
+        {
+          "@type": "BreadcrumbList",
+          itemListElement: [
+            { "@type": "ListItem", position: 1, name: "Home", item: "https://www.tokentracker.cc/" },
+            { "@type": "ListItem", position: 2, name: "Leaderboard", item: "https://www.tokentracker.cc/leaderboard" },
+          ],
+        },
+      ],
+    },
+    seed: `<main class="aeo-seed-content" aria-label="AI Coding Token Usage Leaderboard AI-readable summary">
+      <h1>AI coding token usage leaderboard</h1>
+      <p>
+        The Token Tracker leaderboard ranks opt-in AI coding token usage across Claude Code, OpenAI Codex,
+        Cursor, Gemini CLI and 27 supported tools. It is privacy-first: entries are opt-in and expose token
+        counts only — never prompts or conversation content. See how your AI coding token consumption
+        compares with other developers by model, tool, and time window.
+      </p>
+      <h2>How the leaderboard works</h2>
+      <ul>
+        <li>Opt-in only — you choose whether to appear, using a public display name.</li>
+        <li>Token counts only — never prompts, code, or conversation content.</li>
+        <li>Ranks usage across Claude Code, Codex, Cursor, Gemini and 27 AI coding tools.</li>
+        <li>Powered by optional Token Tracker cloud sync; local-first by default.</li>
+      </ul>
+      <h2>Part of Token Tracker</h2>
+      <p>
+        Token Tracker is a free, open-source, local-first dashboard that monitors AI token usage and cost
+        across 27 AI coding tools. Install with <code>npx tokentracker-cli</code>.
+      </p>
+    </main>`,
+  },
 ];
 
 function routeSeoPagesPlugin() {

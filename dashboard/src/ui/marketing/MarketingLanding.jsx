@@ -9,13 +9,11 @@ import { useLoginModal } from "../../contexts/LoginModalContext.jsx";
 import { STATUSPAGE_URL } from "../../lib/config";
 import { LV3_CSS_VARS } from "./v3/palette.js";
 import { PRIVACY_URL, REPO_URL } from "../../lib/config";
-import { useCommunityStats } from "../../hooks/use-community-stats.js";
 import { HeroSection } from "./v3/HeroSection.jsx";
 import { ToolsStrip } from "./v3/ToolsStrip.jsx";
 import { HowItWorksSection } from "./v3/HowItWorksSection.jsx";
 import { CapabilitiesSection } from "./v3/CapabilitiesSection.jsx";
 import { PrivacySection } from "./v3/PrivacySection.jsx";
-import { LeaderboardSection } from "./v3/LeaderboardSection.jsx";
 import { DownloadSection } from "./v3/DownloadSection.jsx";
 
 /**
@@ -52,7 +50,8 @@ export function MarketingLanding({
   const { signedIn, loading: authLoading } = useInsforgeAuth();
   const { openLoginModal } = useLoginModal();
 
-  const stats = useCommunityStats();
+  // Community stats pruned in this fork (leaderboard removed).
+  const stats = { status: "unavailable", top: [], totalEntries: 0, tokenFloor: 0 };
   const tokenFallback = Number(copy("landing.v3.stats.fallback_tokens")) || 0;
   const devsFallback = Number(copy("landing.v3.stats.fallback_devs")) || 0;
   const githubLabel = copy("landing.cta.secondary");
@@ -159,13 +158,6 @@ export function MarketingLanding({
         <ToolsStrip copy={copy} animate={animate} />
         <HowItWorksSection copy={copy} animate={animate} />
         <PrivacySection copy={copy} animate={animate} />
-        <LeaderboardSection
-          copy={copy}
-          animate={animate}
-          stats={stats}
-          tokenFallback={tokenFallback}
-          devsFallback={devsFallback}
-        />
         <DownloadSection
           copy={copy}
           animate={animate}

@@ -1,4 +1,4 @@
-export type DashboardPreloadTarget = "limits";
+export type DashboardPreloadTarget = "limits" | "leaderboard";
 
 export type DashboardPreloadStatus =
   | "idle"
@@ -31,6 +31,11 @@ export interface DashboardPreloadSnapshot {
   startedAfterMainContentVisible: boolean;
   cache: {
     limits: DashboardPreloadCacheEntry | null;
+    leaderboard: {
+      maxEntries: number;
+      size: number;
+      keys: string[];
+    };
   };
   targets: Record<
     DashboardPreloadTarget,
@@ -58,10 +63,23 @@ export interface DashboardPreloadStateOptions {
   status?: DashboardPreloadStatus;
 }
 
+export interface LeaderboardPreloadOptions {
+  accessMode?: string;
+  authLoading?: boolean;
+  baseUrl?: string;
+  cloudUser?: { id?: string | null } | null;
+  mockEnabled?: boolean;
+  offset?: number;
+  pageSize?: number;
+  period?: string;
+  signedIn?: boolean;
+  userId?: string | null;
+}
+
 export const DASHBOARD_PRELOAD_TARGETS: readonly DashboardPreloadTarget[];
 export const DASHBOARD_PRELOAD_STATUSES: readonly DashboardPreloadStatus[];
 
-export function resetDashboardPreload(): void;
+export function resetDashboardPreload(options?: { leaderboardMaxEntries?: number }): void;
 export function markDashboardMainContentVisible(): void;
 export function getDashboardPreloadSnapshot(): DashboardPreloadSnapshot;
 export function buildDashboardPreloadContextKey(
@@ -91,3 +109,15 @@ export function getUsageLimitsPreloadContextKey(context?: DashboardPreloadContex
 export function readUsageLimitsPreloadState<TData = unknown>(
   contextKey?: string,
 ): DashboardPreloadCacheEntry<TData> | null;
+export function publishLeaderboardPreloadState<TData = unknown>(
+  data: TData | null,
+  options?: DashboardPreloadStateOptions,
+): DashboardPreloadCacheEntry<TData>;
+export function readLeaderboardPreloadState<TData = unknown>(
+  contextKey: string,
+): DashboardPreloadCacheEntry<TData> | null;
+export function getLeaderboardPreloadPageSize(): number;
+export function getLeaderboardPreloadContextKey(options?: LeaderboardPreloadOptions): string;
+export function preloadLeaderboardDefaultState<TData = unknown>(
+  options?: LeaderboardPreloadOptions,
+): Promise<DashboardPreloadCacheEntry<TData> | null>;

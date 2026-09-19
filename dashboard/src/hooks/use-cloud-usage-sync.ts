@@ -13,7 +13,7 @@ function isCloudSyncRoute(pathname: string): boolean {
   const p = pathname.replace(/\/+$/, "") || "/";
   if (p === "/login" || p === "/landing") return false;
   if (isSharePath(p)) return false;
-  return p === "/" || p === "/dashboard" || p.startsWith("/leaderboard");
+  return p === "/" || p === "/dashboard"; // leaderboard routes pruned in this fork
 }
 
 /**

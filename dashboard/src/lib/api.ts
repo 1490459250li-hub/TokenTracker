@@ -8,8 +8,6 @@ import {
   getMockUsageSummary,
   getMockProjectUsageSummary,
   getMockProjectUsageDetail,
-  getMockLeaderboard,
-  getMockAchievements,
   isMockEnabled,
 } from "./mock-data";
 import { getInsforgeRemoteUrl, getInsforgeAnonKey } from "./insforge-config";
@@ -93,7 +91,6 @@ const PATHS = {
   usageCategoryBreakdown: "tokentracker-usage-category-breakdown",
   projectUsageSummary: "tokentracker-project-usage-summary",
   projectUsageDetail: "tokentracker-project-usage-detail",
-  achievements: "tokentracker-achievements",
   userStatus: "tokentracker-user-status",
   localSync: "tokentracker-local-sync",
   usageLimits: "tokentracker-usage-limits",
@@ -257,18 +254,6 @@ export async function getProjectUsageDetail({
   return fetchLocalJson(PATHS.projectUsageDetail, params);
 }
 
-/**
- * Local (privacy-scoped) achievements: project_hopper / project_devotion /
- * night_owl, computed by the local CLI from queue data that never leaves the
- * machine. Cloud badges use the badges-only leaderboard profile fast path.
- */
-export async function getLocalAchievements({ timeZone, tzOffsetMinutes }: AnyRecord = {}) {
-  if (isMockEnabled()) {
-    return getMockAchievements();
-  }
-  return fetchLocalJson(PATHS.achievements, buildTimeZoneParams({ timeZone, tzOffsetMinutes }));
-}
-
 async function fetchInsforgeFunction(slug: string, options: {
   method?: string;
   accessToken?: string;
@@ -314,38 +299,11 @@ async function fetchInsforgeFunction(slug: string, options: {
   return res.json();
 }
 
-export async function getLeaderboard({
-  accessToken,
-  userId,
-  period,
-  metric,
-  limit,
-  offset,
-}: AnyRecord = {}) {
-  if (isMockEnabled()) {
-    return getMockLeaderboard({ seed: accessToken || userId, period, metric, limit, offset });
-  }
-  // Deliberately NOT passing accessToken. Leaderboard is a public read and
-  // InsForge's gateway returns opaque 500 (JWSError) for any JWT issue
-  // (bad signature, expired, rotated secret). Passing user_id as a query
-  // param lets the server compute `is_me` without ever touching the
-  // Authorization header.
-  return fetchInsforgeFunction("tokentracker-leaderboard", {
-    cache: "no-store",
-    params: { period, limit, offset, user_id: userId },
-  });
-}
-
 /**
  * Public, unauthenticated snapshot of privacy-safe community aggregates.
  * Includes models, providers, 30-day growth, token mix, usage bands, and
  * anonymous platform adoption without exposing user-level rows.
  */
-export async function getCommunityModels() {
-  if (isMockEnabled()) return { top_models: [] };
-  return fetchInsforgeFunction("tokentracker-community-models", {});
-}
-
 export async function getPublicVisibility({ accessToken }: AnyRecord = {}) {
   return fetchInsforgeFunction("tokentracker-public-visibility", {
     accessToken,
@@ -372,110 +330,6 @@ export async function setPublicVisibility({
     accessToken,
     method: "POST",
     body,
-  });
-}
-
-export async function refreshLeaderboard({ accessToken, period, source }: AnyRecord = {}) {
-  const body: AnyRecord = {};
-  if (period) body.period = period;
-  if (typeof source === "string" && source.trim()) body.source = source.trim();
-  return fetchInsforgeFunction("tokentracker-leaderboard-refresh", {
-    accessToken,
-    method: "POST",
-    body,
-  });
-}
-
-/**
- * Detailed per-user profile used by the leaderboard modal.
- * Returns hero totals, streak, best day, model highlight, per-provider
- * breakdown, 365-day heatmap and a period-scoped daily trend.
- * See dashboard/edge-patches/tokentracker-leaderboard-profile.ts for the
- * canonical response shape.
- */
-export async function getLeaderboardProfile({
-  accessToken,
-  userId,
-  period,
-  timeZone,
-  tzOffsetMinutes,
-}: AnyRecord = {}) {
-  if (isMockEnabled()) {
-    // Minimal stub for dashboard:dev (no live edge). Frontend layout should
-    // render without throwing; numbers don't need to be plausible.
-    const mock = getMockLeaderboard({ seed: accessToken, period, metric: "all", limit: 250, offset: 0 });
-    const entries = Array.isArray(mock?.entries) ? mock.entries : [];
-    const match: any = entries.find((entry: any) => entry?.user_id === userId) || entries[0] || null;
-    const tokens = Number(match?.total_tokens) || 0;
-    const today = new Date();
-    const heatmap = Array.from({ length: 365 }).map((_, i) => {
-      const d = new Date(today);
-      d.setUTCDate(d.getUTCDate() - (364 - i));
-      return { date: d.toISOString().slice(0, 10), total_tokens: i % 7 === 0 ? Math.floor(tokens / 365) : 0 };
-    });
-    const dailyTrend = heatmap.slice(-7);
-    return {
-      user: {
-        user_id: userId,
-        display_name: match?.display_name || "Mock User",
-        avatar_url: match?.avatar_url || null,
-        github_url: match?.github_url || null,
-        is_anonymous: false,
-        rank: match?.rank ?? null,
-      },
-      period: {
-        kind: period || "week",
-        from: mock?.from ?? null,
-        to: mock?.to ?? null,
-        generated_at: mock?.generated_at ?? new Date().toISOString(),
-      },
-      totals: {
-        total_tokens: tokens,
-        estimated_cost_usd: Number(match?.estimated_cost_usd) || 0,
-        active_days: 53,
-        avg_per_day_usd: 0,
-      },
-      streak: { current_days: 3, longest_days: 12 },
-      best_day: tokens
-        ? { date: today.toISOString().slice(0, 10), total_tokens: Math.floor(tokens / 30), estimated_cost_usd: 0 }
-        : null,
-      models: { count: 5, favorite: { model_name: "claude-opus-4-7", total_tokens: Math.floor(tokens / 2) } },
-      by_provider: [],
-      heatmap,
-      daily_trend: dailyTrend,
-      badges: getMockAchievements().achievements.filter(
-        (badge: any) => badge.tier >= 1 && !["project_hopper", "project_devotion", "night_owl"].includes(badge.id),
-      ),
-      badges_include_unearned: false,
-    };
-  }
-  const tzParams = buildTimeZoneParams({ timeZone, tzOffsetMinutes });
-  return fetchInsforgeFunction("tokentracker-leaderboard-profile", {
-    accessToken,
-    params: { user_id: userId, period, ...tzParams },
-  });
-}
-
-/**
- * Cloud achievements for the signed-in user.
- *
- * The full leaderboard profile response scans and aggregates up to 365 days
- * of hourly usage for its heatmap and trend. The achievements page needs only
- * the precomputed badge rows, so keep it on the authenticated edge fast path.
- */
-export async function getUserBadges({ accessToken, userId }: AnyRecord = {}) {
-  if (isMockEnabled()) {
-    return {
-      badges: getMockAchievements().achievements.filter(
-        (badge: any) => !["project_hopper", "project_devotion", "night_owl"].includes(badge.id),
-      ),
-      badges_include_unearned: true,
-    };
-  }
-  return fetchInsforgeFunction("tokentracker-leaderboard-profile", {
-    accessToken,
-    method: "GET",
-    params: { user_id: userId, view: "badges" },
   });
 }
 

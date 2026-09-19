@@ -1,6 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
-import { getLeaderboard } from "../../lib/api";
-import { isMockEnabled } from "../../lib/mock-data";
+import { useMemo, useState } from "react";
 import {
   buildShareCardData,
   type ShareCardData,
@@ -43,41 +41,10 @@ export function useShareCardData(params: UseShareCardDataParams): ShareCardData 
     exchangeRate,
   } = params;
 
-  const [rank, setRank] = useState<number | null>(null);
+  const [rank] = useState<number | null>(null);
   const rate = exchangeRate;
 
-  useEffect(() => {
-    if (!enabled) return;
-    if (!userId && !isMockEnabled()) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const leaderboardPeriod = period === "day" || period === "custom" ? "week" : period;
-        const payload = await getLeaderboard({
-          accessToken,
-          userId,
-          period: leaderboardPeriod,
-          metric: "all",
-          limit: 100,
-          offset: 0,
-        } as any);
-        if (cancelled) return;
-        const entries = Array.isArray((payload as any)?.entries)
-          ? (payload as any).entries
-          : Array.isArray(payload)
-            ? payload
-            : [];
-        const mine = entries.find((entry: any) => entry?.is_me === true);
-        const r = typeof mine?.rank === "number" ? mine.rank : null;
-        setRank(r);
-      } catch {
-        if (!cancelled) setRank(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, accessToken, userId, period]);
+  // Leaderboard pruned in this fork: share cards no longer show a global rank.
 
   return useMemo(
     () =>

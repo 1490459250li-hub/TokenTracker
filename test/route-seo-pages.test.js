@@ -9,15 +9,15 @@ function read(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 }
 
-// Guards the SEO fix that makes /ip-check and /leaderboard independently
-// indexable. The dashboard is a single-page app: Vercel rewrites every route to
+// Guards the SEO fix that makes /ip-check independently indexable.
+// (The /leaderboard SEO page was pruned in this fork along with the leaderboard.)
+// The dashboard is a single-page app: Vercel rewrites every route to
 // index.html, whose canonical is the homepage. Without per-route static HTML
 // (self-referential canonical + route-specific copy) Google collapses these
 // routes into the homepage and drops them from the index — which is exactly the
 // organic traffic these tests protect.
 const ROUTE_PAGES = [
   { route: "/ip-check", file: "/ip-check.html", canonical: "https://www.tokentracker.cc/ip-check" },
-  { route: "/leaderboard", file: "/leaderboard.html", canonical: "https://www.tokentracker.cc/leaderboard" },
 ];
 
 test("vercel.json rewrites map route SEO pages before the SPA catch-all", () => {
