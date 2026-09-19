@@ -3109,6 +3109,100 @@ function createLocalApiHandler({ queuePath }) {
       }
       return true;
     }
+
+    // --- api-shim keys（本 fork：设置页 API 直连分区的 key 读写）---
+    if (p === "/functions/tokentracker-api-keys") {
+      const fsSync = require("node:fs");
+      const pathMod = require("node:path");
+      const osMod = require("node:os");
+      const shimDir = pathMod.join(osMod.homedir(), ".tokentracker", "api-shim");
+      const configFile = pathMod.join(shimDir, "config.json");
+      try {
+        let conf = {};
+        try { conf = JSON.parse(fsSync.readFileSync(configFile, "utf8")) || {}; } catch {}
+        if (req.method === "POST") {
+          const body = await readJsonBody(req);
+          conf.upstreams = conf.upstreams || {};
+          for (const [key, value] of Object.entries(body.upstreams || {})) {
+            conf.upstreams[key] = conf.upstreams[key] || {};
+            if (typeof value.api_key === "string") {
+              conf.upstreams[key].api_key = value.api_key.trim();
+            }
+          }
+          fsSync.mkdirSync(shimDir, { recursive: true });
+          fsSync.writeFileSync(configFile, JSON.stringify(conf, null, 2) + "", "utf8");
+          // 热重载 shim（未运行则忽略——下次启动自然生效）
+          let reloaded = false;
+          try {
+            const port = Number(conf.port) || 17444;
+            const ctl = new AbortController();
+            const timer = setTimeout(() => ctl.abort(), 3000);
+            await fetch(`http://127.0.0.1:${port}/reload`, { method: "POST", signal: ctl.signal });
+            clearTimeout(timer);
+            reloaded = true;
+          } catch { reloaded = false; }
+          json(res, { ok: true, reloaded });
+          return true;
+        }
+        // GET：脱敏返回
+        const masked = {};
+        for (const [key, upstream] of Object.entries(conf.upstreams || {})) {
+          const k = String(upstream.api_key || "");
+          masked[key] = {
+            base_url: upstream.base_url || "",
+            has_key: k.length > 0,
+            key_masked: k ? (k.slice(0, Math.min(4, k.length)) + "…" + k.slice(-4)) : "",
+            label: upstream.label || key,
+          };
+        }
+        json(res, { upstreams: masked, port: Number(conf.port) || 17444 });
+        return true;
+      } catch (e) {
+        json(res, { ok: false, error: e?.message || "Unknown error" }, 500);
+        return true;
+      }
+    }
+
+    // --- api-shim pricing（本 fork：用户模型单价覆盖读写）---
+    if (p === "/functions/tokentracker-api-pricing") {
+      const plans = require("./api-plans");
+      const pricing = require("./pricing");
+      const fsSync = require("node:fs");
+      const pathMod = require("node:path");
+      try {
+        if (req.method === "POST") {
+          const body = await readJsonBody(req);
+          const exact = {};
+          for (const row of Array.isArray(body.models) ? body.models : []) {
+            const model = String(row.model || "").trim();
+            if (!model) continue;
+            exact[model] = {
+              input: Number(row.input) || 0,
+              output: Number(row.output) || 0,
+              cache_read: Number(row.cache_read) || 0,
+              note: "设置页 API 直连分区",
+            };
+          }
+          fsSync.mkdirSync(pathMod.dirname(plans.BUDGETS_FILE()), { recursive: true });
+          const pricingFile = pathMod.join(pathMod.dirname(plans.BUDGETS_FILE()), "pricing.json");
+          fsSync.writeFileSync(pricingFile, JSON.stringify({ exact }, null, 2) + "", "utf8");
+          pricing.applyUserPricingFile();
+          json(res, { ok: true });
+          return true;
+        }
+        let exact = {};
+        try {
+          const pricingFile = pathMod.join(pathMod.dirname(plans.BUDGETS_FILE()), "pricing.json");
+          exact = JSON.parse(fsSync.readFileSync(pricingFile, "utf8"))?.exact || {};
+        } catch {}
+        json(res, { models: exact });
+        return true;
+      } catch (e) {
+        json(res, { ok: false, error: e?.message || "Unknown error" }, 500);
+        return true;
+      }
+    }
+
     // --- usage-limits ---
     if (p === "/functions/tokentracker-usage-limits") {
       const { getUsageLimits, resetUsageLimitsCache } = require("./usage-limits");

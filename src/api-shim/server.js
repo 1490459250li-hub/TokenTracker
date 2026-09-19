@@ -249,7 +249,7 @@ function forward(upstream, req, res, bodyBuffer, log) {
     },
     (upstreamRes) => {
       const started = Date.now();
-      res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+      res.writeHead(upstreamRes.statusCode || 502, { ...upstreamRes.headers, ...cors });
       const contentType = String(
         upstreamRes.headers["content-type"] || "",
       ).toLowerCase();
@@ -305,16 +305,21 @@ function forward(upstream, req, res, bodyBuffer, log) {
   upstreamReq.end(payload);
 }
 
-function createServer(config, log) {
+function createServer(config, log, reloadConfig) {
   const upstreamPrefixes = new Map();
-  for (const upstream of Object.values(config.upstreams)) {
-    upstream.prefix = `/${upstream.key}`;
-    upstreamPrefixes.set(`/${upstream.key}`, upstream);
+  function rebuildPrefixes() {
+    upstreamPrefixes.clear();
+    for (const upstream of Object.values(config.upstreams)) {
+      upstream.prefix = `/${upstream.key}`;
+      upstreamPrefixes.set(`/${upstream.key}`, upstream);
+    }
   }
-  return http.createServer((req, res) => {
+  rebuildPrefixes();
+  const cors = { "access-control-allow-origin": "*" };
+  return http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
-        "access-control-allow-origin": "*",
+        ...cors,
         "access-control-allow-methods": "GET, POST, OPTIONS",
         "access-control-allow-headers": "*",
       });
@@ -322,7 +327,7 @@ function createServer(config, log) {
       return;
     }
     if (req.method === "GET" && req.url === "/healthz") {
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(200, { "content-type": "application/json", ...cors });
       res.end(
         JSON.stringify({
           ok: true,
@@ -337,10 +342,30 @@ function createServer(config, log) {
       );
       return;
     }
+    // 热重载：设置页保存 API key 后由 dashboard 调用，免重启生效
+    if (req.method === "POST" && req.url === "/reload") {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", async () => {
+        try {
+          const fresh = await reloadConfig();
+          res.writeHead(200, { "content-type": "application/json", ...cors });
+          res.end(JSON.stringify({
+            ok: true,
+            upstreams: Object.keys(fresh.upstreams),
+            log: fresh.log_path,
+          }));
+        } catch (err) {
+          res.writeHead(500, { "content-type": "application/json", ...cors });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
     const prefix = `/${req.url.split("/").filter(Boolean)[0] || ""}`;
     const upstream = upstreamPrefixes.get(prefix);
     if (!upstream) {
-      res.writeHead(404, { "content-type": "application/json" });
+      res.writeHead(404, { "content-type": "application/json", ...cors });
       res.end(
         JSON.stringify({
           error: {
@@ -366,7 +391,12 @@ async function main() {
   const args = parseArgs(process.argv);
   const config = await loadConfig(args.config, args.port);
   const log = new UsageLog(config.log_path);
-  const server = createServer(config, log);
+  const reloadConfig = async () => {
+    const fresh = await loadConfig(args.config, args.port);
+    Object.assign(config, fresh);
+    return config;
+  };
+  const server = createServer(config, log, reloadConfig);
   server.listen(config.port, config.host, () => {
     console.log(`[api-shim] listening on http://${config.host}:${config.port}`);
     for (const upstream of Object.values(config.upstreams)) {

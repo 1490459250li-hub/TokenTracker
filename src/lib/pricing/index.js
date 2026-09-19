@@ -8,6 +8,31 @@ const path = require("node:path");
 const os = require("node:os");
 
 const curatedOverrides = require("./curated-overrides.json");
+
+// ── 用户定价覆盖（本 fork 新增）────────────────────────────────────────────
+// 设置页"API 直连"分区写入 ~/.tokentracker/api-shim/pricing.json（exact 表），
+// 启动时合并进 curated 表，保存时经 applyUserPricingFile() 热更新，无需重启。
+const USER_PRICING_PATH = path.join(
+  os.homedir(), ".tokentracker", "api-shim", "pricing.json",
+);
+const curatedMerged = { ...curatedOverrides, exact: { ...curatedOverrides.exact } };
+let userPricingKeys = [];
+function mergeUserPricingFile() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(USER_PRICING_PATH, "utf8"));
+    if (parsed?.exact && typeof parsed.exact === "object") {
+      // 先移除上一次用户文件引入的键，避免删掉的覆盖项残留
+      for (const k of userPricingKeys) delete curatedMerged.exact[k];
+      userPricingKeys = Object.keys(parsed.exact);
+      for (const [k, v] of Object.entries(parsed.exact)) {
+        curatedMerged.exact[k] = v;
+      }
+      return true;
+    }
+  } catch { /* 文件不存在或格式错误 — 忽略 */ }
+  return false;
+}
+mergeUserPricingFile();
 const {
   lookupPricing,
   buildLitellmPerMillionMap,
@@ -119,7 +144,7 @@ function getModelPricing(model, opts = {}) {
   if (state.negativeCache.has(cacheKey)) return ZERO_PRICING;
 
   const result = lookupPricing(model, {
-    curated: curatedOverrides,
+    curated: curatedMerged,
     litellm: state.litellmPerMillionMap,
     source: lookupSource,
   });
@@ -310,7 +335,16 @@ function computeRowCost(row) {
 // CURATED.exact map (which contains the kiro entries by design); LiteLLM
 // entries are NOT included here because they're keyed dynamically and the old
 // table was authoritative for what is now CURATED.
-const MODEL_PRICING = curatedOverrides.exact;
+const MODEL_PRICING = curatedMerged.exact;
+
+function applyUserPricingFile() {
+  const changed = mergeUserPricingFile();
+  if (changed) {
+    state.negativeCache.clear();
+    state.revision += 1;
+  }
+  return changed;
+}
 
 module.exports = {
   ensurePricingLoaded,
@@ -318,6 +352,8 @@ module.exports = {
   getModelPricing,
   getRowPricing,
   computeRowCost,
+  applyUserPricingFile,
+  USER_PRICING_PATH,
   resetPricingForTests,
   MODEL_PRICING,
   ZERO_PRICING,
