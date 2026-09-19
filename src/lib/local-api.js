@@ -3093,6 +3093,23 @@ function createLocalApiHandler({ queuePath }) {
     // --- achievements endpoint pruned in this fork (achievements removed) ---
 
     // --- usage-limits ---
+    // --- api-plans budgets (read/update user budget + plan settings) ---
+    if (p === "/functions/tokentracker-api-plans") {
+      const plans = require("./api-plans");
+      try {
+        if (req.method === "POST") {
+          const body = await readJsonBody(req);
+          await plans.writeBudgets(body);
+          json(res, { ok: true });
+        } else {
+          json(res, await plans.readBudgets());
+        }
+      } catch (e) {
+        json(res, { ok: false, error: e?.message || "Unknown error" }, 500);
+      }
+      return true;
+    }
+    // --- usage-limits ---
     if (p === "/functions/tokentracker-usage-limits") {
       const { getUsageLimits, resetUsageLimitsCache } = require("./usage-limits");
       try {

@@ -334,6 +334,131 @@ const PET_STATUS_COLORS = {
   danger: "rgba(255, 116, 126, 0.98)",
 };
 
+// ── 宠物血条：API 直连套餐消耗（本 fork 新增）──
+// 常驻悬浮于宠物头顶（顶部气泡带内），多套餐上下堆叠；10 分钟无使用的套餐自动隐藏，
+// 剩余血条以 CSS transition 平滑上移补位。数据来自宿主推送的 __ttPetLimits.apiPlans。
+const PLAN_IDLE_HIDE_MS = 10 * 60 * 1000;
+const PLAN_SEGMENTS = 10;
+
+// 宿主推送的 last_activity_ts 可能是数字毫秒或 ISO 字符串——Date.parse(数字) 会得到
+// NaN（曾导致所有血条被闲置过滤误隐藏），这里统一归一化。
+function planTsToMs(value) {
+  const n = Number(value);
+  if (Number.isFinite(n) && n > 0) return n;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function planLevel(pct) {
+  if (pct >= 90) return "crit";
+  if (pct >= 70) return "warn";
+  return "";
+}
+
+function PlanBars({ plans, fetchedAt }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const items = [];
+  const deepseek = plans?.plans?.deepseek;
+  if (deepseek?.budget_usd > 0) {
+    const pct = Math.min(100, ((deepseek.spend_today_usd || 0) / deepseek.budget_usd) * 100);
+    items.push({
+      key: "deepseek-api",
+      label: `DEEPSEEK · $${(deepseek.spend_today_usd || 0).toFixed(2)} / $${deepseek.budget_usd}`,
+      pct,
+      lastTs: planTsToMs(deepseek.last_activity_ts),
+    });
+  }
+  const mimo = plans?.plans?.mimo;
+  if (mimo?.plan_credits > 0) {
+    const pct = Math.min(100, ((mimo.credits_used || 0) / mimo.plan_credits) * 100);
+    items.push({
+      key: "mimo-api",
+      label: `MIMO · ${mimo.credits_used || 0} / ${mimo.plan_credits} Credits`,
+      pct,
+      lastTs: planTsToMs(mimo.last_activity_ts),
+    });
+  }
+  for (const m of plans?.plans?.sensenova?.models || []) {
+    if (!m.limit || m.limit <= 0) continue;
+    const pct = Math.min(100, ((m.calls_in_window || 0) / m.limit) * 100);
+    items.push({
+      key: `sensenova-api/${m.model}`,
+      label: `SENSENOVA · ${m.model} · ${m.calls_in_window}/${m.limit} 次`,
+      pct,
+      lastTs: planTsToMs(m.last_activity_ts),
+    });
+  }
+
+  // 10 分钟无使用的套餐隐藏（活跃判定用服务端时间戳）
+  const visible = items.filter((it) => !it.lastTs || now - it.lastTs < PLAN_IDLE_HIDE_MS);
+
+  if (visible.length === 0) return null;
+
+  return (
+    <div style={{
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      alignItems: "center",
+      width: "100%",
+      padding: "2px 6px",
+    }}>
+      {visible.map((it) => {
+        const level = planLevel(it.pct);
+        const filled = Math.round((it.pct / 100) * PLAN_SEGMENTS);
+        const glowColor = level === "crit" ? "#ff6a8a" : level === "warn" ? "#ffd76e" : "#22d3ee";
+        return (
+          <div key={it.key} style={{
+            width: "100%", maxWidth: 260,
+            opacity: 1, transform: "translateY(0)",
+            transition: "opacity .45s ease, transform .45s ease",
+          }}>
+            <div style={{
+              display: "flex", gap: 2,
+              background: "#0a0a12cc",
+              border: "2px solid #3c3c50",
+              boxShadow: `0 0 0 1px #000, 0 0 8px ${glowColor}44`,
+              padding: 3,
+              borderRadius: 4,
+            }}>
+              {Array.from({ length: PLAN_SEGMENTS }).map((_, i) => {
+                const on = i < filled;
+                return (
+                  <div key={i} style={{
+                    flex: 1, height: 12,
+                    background: on
+                      ? `linear-gradient(180deg, ${glowColor} 0%, ${glowColor}99 55%, ${glowColor}55 100%)`
+                      : "#23233a",
+                    boxShadow: on ? `0 0 5px ${glowColor}66, inset 0 -3px 0 ${glowColor}55, inset 0 2px 0 #ffffff33` : "none",
+                    borderRadius: 2,
+                    transition: "background .4s ease, box-shadow .4s ease",
+                  }} />
+                );
+              })}
+            </div>
+            <div style={{
+              display: "flex", justifyContent: "space-between",
+              fontSize: 11, color: "#b8b8cc", marginTop: 4,
+              textShadow: "0 1px 2px #000",
+              whiteSpace: "nowrap", overflow: "hidden",
+            }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{it.label}</span>
+              <span style={{ color: glowColor, fontWeight: "bold" }}>{it.pct.toFixed(0)}%</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── 宠物血条结束 ──
+
 /** Transparent glass speech bubble shown in the top band. Hover usage gets a
     compact token row plus one progress row for every active, non-full limit. */
 function Bubble({ text, usage = null, onHeightChange }) {
@@ -957,10 +1082,17 @@ function Pet() {
           flexShrink: 0,
           width: "100%",
           display: "flex",
-          alignItems: "flex-end",
-          justifyContent: "center",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 4,
+          paddingTop: 4,
         }}
       >
+        {(() => {
+          const plans = window.__ttPetLimits?.apiPlans || null;
+          return plans ? <PlanBars plans={plans} fetchedAt={plans.fetched_at} /> : null;
+        })()}
         {bubbleText && (
           <Bubble text={bubbleText} usage={hoverUsage} onHeightChange={reportBubbleHeight} />
         )}

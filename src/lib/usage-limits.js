@@ -15,6 +15,7 @@ const {
   readCodexAccessToken,
   readCodexAuthBundle,
 } = require("./subscriptions");
+const { buildApiPlansPayload } = require("./api-plans");
 const {
   isTokenStale,
   refreshCodexTokens,
@@ -4201,6 +4202,14 @@ async function fetchUsageLimitsUncached({
     codingPlan: withPlanLabel(codingPlan, codingPlan?.plan_label, "Ark Coding Plan"),
     agentPlan: withPlanLabel(agentPlan, agentPlan?.plan_label, "Ark Agent Plan"),
   };
+
+  // API 直连套餐（shim 记账）：DeepSeek 余额/预算、MiMo 月度 Credits、日日新 5h 调用窗口。
+  // 任何失败都降级为 null，绝不影响既有 provider 卡片。
+  try {
+    data.apiPlans = await buildApiPlansPayload();
+  } catch (err) {
+    data.apiPlans = null;
+  }
 
   for (const [providerName, provider] of Object.entries(data)) {
     if (providerName === "fetched_at" || !provider || typeof provider !== "object") continue;

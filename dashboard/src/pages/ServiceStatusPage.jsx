@@ -81,6 +81,32 @@ export const STATUS_PROVIDERS = [
   },
 ];
 
+// 无公开状态 JSON feed 的平台（DeepSeek 状态页为自研站无 API、MiMo/日日新未发现公开 feed）
+// 按用户决策渲染为"跳转官方控制台/状态页"链接卡，不伪造状态数据。
+const LINK_PROVIDERS = [
+  {
+    id: "deepseek-link",
+    name: "DeepSeek",
+    icon: "DEEPSEEK-API",
+    pageUrl: "https://status.deepseek.com",
+    note: "官方状态页（无公开 JSON 接口，点击在浏览器中查看实时状态）",
+  },
+  {
+    id: "mimo-link",
+    name: "Xiaomi MiMo",
+    icon: "MIMO-API",
+    pageUrl: "https://platform.xiaomimimo.com",
+    note: "前往 MiMo 开放平台控制台查看用量与公告",
+  },
+  {
+    id: "sensenova-link",
+    name: "商汤日日新",
+    icon: "SENSENOVA-API",
+    pageUrl: "https://platform.sensenova.cn",
+    note: "前往日日新平台控制台查看用量与公告",
+  },
+];
+
 const REFRESH_INTERVAL_MS = 60_000;
 const PROBE_TIMEOUT_MS = 8_000;
 
@@ -232,6 +258,34 @@ function StatusCard({ provider, result }) {
   );
 }
 
+/** 无公开状态 feed 的平台：跳转官方控制台/状态页的链接卡。 */
+function LinkCard({ provider }) {
+  return (
+    <a
+      href={provider.pageUrl}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={provider.name}
+      title={provider.note}
+      className="group block no-underline text-inherit rounded-xl border border-oai-gray-200 dark:border-oai-gray-800 bg-white dark:bg-oai-gray-900 p-4 sm:p-5 transition-colors hover:border-oai-gray-300 dark:hover:border-oai-gray-700 hover:bg-oai-gray-50 dark:hover:bg-oai-gray-800/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-oai-brand-500"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <ProviderIcon provider={provider.icon} size={20} />
+          <span className="font-medium text-sm sm:text-base truncate">{provider.name}</span>
+        </div>
+        <span
+          aria-hidden
+          className="shrink-0 inline-flex h-8 w-8 items-center justify-center rounded-lg text-oai-gray-400 transition-colors group-hover:text-oai-black dark:group-hover:text-white"
+        >
+          <ExternalLink className="h-4 w-4" />
+        </span>
+      </div>
+      <p className="mt-3 text-xs text-oai-gray-500 dark:text-oai-gray-400 break-words">{provider.note}</p>
+    </a>
+  );
+}
+
 export function ServiceStatusPage() {
   // provider id -> probe result (null while a first read is in flight)
   const [results, setResults] = useState({});
@@ -300,6 +354,12 @@ export function ServiceStatusPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {STATUS_PROVIDERS.map((p) => (
               <StatusCard key={p.id} provider={p} result={results[p.id] ?? null} />
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+            {LINK_PROVIDERS.map((p) => (
+              <LinkCard key={p.id} provider={p} />
             ))}
           </div>
 

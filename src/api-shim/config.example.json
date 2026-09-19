@@ -18,6 +18,14 @@
       "api_key": "在此填入你的-MIMO-KEY",
       "inject_include_usage": true,
       "label": "Xiaomi MiMo API"
+    },
+    "sensenova": {
+      "_note": "调用方式：base_url 设为 http://127.0.0.1:17444/sensenova/v1 。日日新 OpenAI 兼容网关（platform.sensenova.cn/console/keys 申请 key，sk- 开头）",
+      "base_url": "https://token.sensenova.cn/v1",
+      "api_key": "在此填入你的-日日新-KEY",
+      "inject_include_usage": false,
+      "_inject_note": "日日新网关 schema 较严，可能拒收 stream_options 注入字段——若流式报错请改为 false",
+      "label": "SenseNova API"
     }
   }
 }

@@ -16,6 +16,7 @@ import { useLimitAlertPrefs } from "../hooks/use-limit-alert-prefs";
 import { sendPredictiveLimitAlerts } from "../lib/limit-alerts.js";
 import { isNativeEmbed, postNativeMessage } from "../lib/native-bridge.js";
 import { listSubscriptions } from "../lib/subscription-manager-api";
+import { ApiPlanCards } from "../components/ApiPlanCards.jsx";
 
 const IS_LOCAL_HOST =
   typeof window !== "undefined" &&
@@ -181,6 +182,7 @@ export function LimitsPage() {
             </div>
           </div>
 
+          <ApiPlanCards apiPlans={usageLimits?.apiPlans} />
           {isLoading ? (
             <LimitsPageSkeleton />
           ) : (
