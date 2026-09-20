@@ -12,11 +12,28 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
 };
 
-function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+/**
+ * Pass `req` to let a large body be gzipped when the caller advertises it.
+ *
+ * Same trade as the heatmap endpoint: the per-source model lists repeat the same
+ * model names and pricing keys, so a heavy account's breakdown compresses from
+ * roughly 5-25 KB to a fifth of that. Callers that do not advertise gzip still
+ * get identity, so this cannot break an older client.
+ */
+function json(data: unknown, status = 200, req?: Request) {
+  const body = JSON.stringify(data);
+  const headers: Record<string, string> = { ...corsHeaders, "Content-Type": "application/json" };
+  const acceptsGzip = (req?.headers.get("accept-encoding") || "").toLowerCase().includes("gzip");
+  // Below ~1 KB the gzip header costs more than it saves.
+  if (acceptsGzip && body.length >= 1024) {
+    headers["Content-Encoding"] = "gzip";
+    headers["Vary"] = "Accept-Encoding";
+    return new Response(
+      new Blob([body]).stream().pipeThrough(new CompressionStream("gzip")),
+      { status, headers },
+    );
+  }
+  return new Response(body, { status, headers });
 }
 
 /**
@@ -531,61 +548,75 @@ interface GroupedRow {
   pricing_tier?: string;
 }
 
-const GROUPED_ROWS_TTL_MS = 30_000;
-const GROUPED_ROWS_STALE_IF_ERROR_MS = 5 * 60_000;
-const groupedRowsCache = new Map<string, { fetchedAt: number; rows: GroupedRow[] }>();
-const groupedRowsInFlight = new Map<string, Promise<GroupedRow[]>>();
+// [source, model, pricing_tier, total, input, output, cache_read, cache_write,
+// reasoning] already summed over [from, to], as returned by
+// account_model_breakdown_compact.
+type CompactDim = [string | null, string | null, string | null, number | string,
+  number | string, number | string, number | string, number | string, number | string];
+
+const COMPACT_TTL_MS = 30_000;
+const COMPACT_STALE_IF_ERROR_MS = 5 * 60_000;
+const compactCache = new Map<string, { fetchedAt: number; dims: CompactDim[] }>();
+const compactInFlight = new Map<string, Promise<CompactDim[]>>();
 
 /**
- * Server-side aggregation. One RPC replaces the old N paginated 1000-row raw
- * fetches: account_usage_grouped() GROUPs BY (tz-local day, source, model) in
- * Postgres and returns a single JSONB array. We still filter to local days in
- * [from, to] and collapse to (source, model) in-edge — SUM across the user's
- * active devices is byte-identical; tz-local day bucketing uses `AT TIME ZONE`
- * (same IANA database as the old JS Intl path, incl. DST).
+ * Server-side aggregation, folded down to what this endpoint emits.
+ *
+ * account_model_breakdown_compact() runs the very same
+ * account_usage_grouped_cached() scan underneath — same 30s shared Postgres
+ * cache, same cross-device dedup — but drops the day dimension in Postgres.
+ * This endpoint groups by (source, model) and hardcodes `days: 0`, so the
+ * per-day rows only ever crossed the network to be summed and discarded; for a
+ * typical account they are 9-23% as many rows once folded.
+ *
+ * pricing_tier stays in the key so DeepSeek V4 peak/off_peak rows for one model
+ * keep their separate prices, and the loop below re-splits them into the same
+ * model entry exactly as the per-day rows did.
  */
-async function fetchGroupedRows(
+async function fetchCompactDims(
   client: ReturnType<typeof createClient>,
   userId: string,
   requestedDeviceId: string | null,
   fromIso: string,
   toIso: string,
-  trunc: "hour" | "day" | "month" | "none",
+  rangeFrom: string,
+  rangeTo: string,
   tz: string | null,
   tzOffsetMinutes: number | null,
-): Promise<GroupedRow[]> {
-  const cacheKey = JSON.stringify([userId, requestedDeviceId, fromIso, toIso, trunc, tz, tzOffsetMinutes]);
-  const cached = groupedRowsCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < GROUPED_ROWS_TTL_MS) return cached.rows;
-  const existing = groupedRowsInFlight.get(cacheKey);
+): Promise<CompactDim[]> {
+  const cacheKey = JSON.stringify([userId, requestedDeviceId, fromIso, toIso, rangeFrom, rangeTo, tz, tzOffsetMinutes]);
+  const cached = compactCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < COMPACT_TTL_MS) return cached.dims;
+  const existing = compactInFlight.get(cacheKey);
   if (existing) return existing;
 
   const pending = (async () => {
     try {
-      const { data, error } = await client.database.rpc("account_usage_grouped_cached", {
+      const { data, error } = await client.database.rpc("account_model_breakdown_compact", {
         p_user_id: userId,
         p_device_id: requestedDeviceId,
         p_from: fromIso,
         p_to: toIso,
-        p_trunc: trunc,
         p_tz: tz,
         p_offset_min: tzOffsetMinutes,
+        p_range_from: rangeFrom,
+        p_range_to: rangeTo,
       });
       if (error) throw new Error(error.message);
-      const rows = (Array.isArray(data) ? data : []) as GroupedRow[];
-      groupedRowsCache.set(cacheKey, { fetchedAt: Date.now(), rows });
-      if (groupedRowsCache.size > 64) {
-        const oldest = groupedRowsCache.keys().next().value;
-        if (oldest) groupedRowsCache.delete(oldest);
+      const dims = (Array.isArray(data) ? data : []) as CompactDim[];
+      compactCache.set(cacheKey, { fetchedAt: Date.now(), dims });
+      if (compactCache.size > 64) {
+        const oldest = compactCache.keys().next().value;
+        if (oldest) compactCache.delete(oldest);
       }
-      return rows;
+      return dims;
     } catch (error) {
-      const stale = groupedRowsCache.get(cacheKey);
-      if (stale && Date.now() - stale.fetchedAt < GROUPED_ROWS_STALE_IF_ERROR_MS) return stale.rows;
+      const stale = compactCache.get(cacheKey);
+      if (stale && Date.now() - stale.fetchedAt < COMPACT_STALE_IF_ERROR_MS) return stale.dims;
       throw error;
     }
-  })().finally(() => groupedRowsInFlight.delete(cacheKey));
-  groupedRowsInFlight.set(cacheKey, pending);
+  })().finally(() => compactInFlight.delete(cacheKey));
+  compactInFlight.set(cacheKey, pending);
   return pending;
 }
 
@@ -646,17 +677,31 @@ export default async function (req: Request): Promise<Response> {
   const rangeStart = startDate.toISOString();
   const rangeEnd = endDate.toISOString();
 
-  let rows: GroupedRow[];
+  let dims: CompactDim[];
   try {
-    rows = await fetchGroupedRows(client, userId, requestedDeviceId, rangeStart, rangeEnd, "day", tz, tzOffsetMinutes);
+    dims = await fetchCompactDims(client, userId, requestedDeviceId, rangeStart, rangeEnd, from, to, tz, tzOffsetMinutes);
   } catch (e) {
     return json({ error: (e as Error).message }, 500);
   }
 
-  // Keep only the tz-local days in [from, to]. The RPC already bucketed each
-  // row to its local day (honoring tz / tz_offset_minutes), so this compares
-  // the bucket directly — same inclusive [from, to] semantics as before.
-  const filtered = rows.filter((r) => r.bucket >= from && r.bucket <= to);
+  // The RPC bucketed each row to its local day (honoring tz / tz_offset_minutes)
+  // and kept only the days in [from, to] — same inclusive semantics as the
+  // `r.bucket >= from && r.bucket <= to` filter this used to do here — then
+  // summed the days away. `bucket` and `conversations` are gone because nothing
+  // below reads them.
+  const filtered: GroupedRow[] = dims.map((d) => ({
+    bucket: "",
+    source: d[0] as string,
+    model: d[1] as string,
+    pricing_tier: d[2] ?? undefined,
+    total_tokens: Number(d[3]) || 0,
+    input_tokens: Number(d[4]) || 0,
+    output_tokens: Number(d[5]) || 0,
+    cached_input_tokens: Number(d[6]) || 0,
+    cache_creation_input_tokens: Number(d[7]) || 0,
+    reasoning_output_tokens: Number(d[8]) || 0,
+    conversations: 0,
+  }));
 
   interface ModelAgg {
     model: string;
@@ -766,5 +811,5 @@ export default async function (req: Request): Promise<Response> {
       source: "litellm",
       effective_from: new Date().toISOString().slice(0, 10),
     },
-  });
+  }, 200, req);
 }

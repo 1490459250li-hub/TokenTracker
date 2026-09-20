@@ -11,11 +11,34 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
 };
 
-function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+/**
+ * Pass `req` to let a large body be gzipped when the caller advertises it.
+ *
+ * Neither the InsForge gateway nor PostgREST negotiate compression, so a 52-week
+ * heatmap crossed the wire as ~65 KB of highly repetitive JSON (the same model
+ * names once per active day). gzip takes that to ~12 KB, a 5.5x cut on the
+ * single largest slice of client-facing egress.
+ *
+ * Every caller in this path decompresses transparently and advertises support by
+ * default: browsers, and Node's fetch — which is what the local CLI uses to
+ * proxy every macOS and Windows app request (the `node` user-agent in the access
+ * log). Anything that does not advertise gzip still gets identity, so this
+ * cannot break an older client.
+ */
+function json(data: unknown, status = 200, req?: Request) {
+  const body = JSON.stringify(data);
+  const headers: Record<string, string> = { ...corsHeaders, "Content-Type": "application/json" };
+  const acceptsGzip = (req?.headers.get("accept-encoding") || "").toLowerCase().includes("gzip");
+  // Below ~1 KB the gzip header costs more than it saves.
+  if (acceptsGzip && body.length >= 1024) {
+    headers["Content-Encoding"] = "gzip";
+    headers["Vary"] = "Accept-Encoding";
+    return new Response(
+      new Blob([body]).stream().pipeThrough(new CompressionStream("gzip")),
+      { status, headers },
+    );
+  }
+  return new Response(body, { status, headers });
 }
 
 /**
@@ -94,75 +117,76 @@ async function verifiedUserIdFromJwt(authHeader: string | null): Promise<string 
   return null;
 }
 
-interface GroupedRow {
-  bucket: string;
-  source: string | null;
-  model: string | null;
-  total_tokens: number | null;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  cached_input_tokens: number | null;
-  cache_creation_input_tokens: number | null;
-  reasoning_output_tokens: number | null;
-  conversations: number | null;
-}
+// [local day, total tokens, { model: tokens }] as returned by
+// account_heatmap_compact. Positional, so the model names are the only
+// repeated strings on the wire.
+type CompactDay = [string, number | string, Record<string, number | string> | null];
 
-const GROUPED_ROWS_TTL_MS = 30_000;
-const GROUPED_ROWS_STALE_IF_ERROR_MS = 5 * 60_000;
-const groupedRowsCache = new Map<string, { fetchedAt: number; rows: GroupedRow[] }>();
-const groupedRowsInFlight = new Map<string, Promise<GroupedRow[]>>();
+const COMPACT_TTL_MS = 30_000;
+const COMPACT_STALE_IF_ERROR_MS = 5 * 60_000;
+const compactCache = new Map<string, { fetchedAt: number; days: CompactDay[] }>();
+const compactInFlight = new Map<string, Promise<CompactDay[]>>();
 
 /**
- * Server-side aggregation. One RPC replaces the old N paginated 1000-row raw
- * fetches: account_usage_grouped() GROUPs BY (tz-local bucket, source, model)
- * in Postgres and returns a single JSONB array, so a 52-week heatmap that used
- * to need ~7 page round-trips (~3s) returns a few hundred rows in one call
- * (~150ms). SUM across the user's active devices is byte-identical to the old
- * in-edge aggregation; tz-local day/hour bucketing is done with `AT TIME ZONE`
- * (same IANA database as the old JS `Intl.DateTimeFormat` path, incl. DST).
+ * Server-side aggregation, folded all the way down to one row per local day.
+ *
+ * account_heatmap_compact() runs the very same account_usage_grouped_cached()
+ * scan underneath — same 30s shared Postgres cache, same cross-device dedup —
+ * but collapses (bucket, source, model, pricing_tier) x 8 token columns into
+ * [day, total_tokens, { model: tokens }] inside Postgres. The heatmap only ever
+ * read `bucket`, `model` and `total_tokens`, so shipping the other eight columns
+ * over the wire was pure egress: they crossed the network only to be summed and
+ * dropped. A 52-week window for a heavy account goes from ~400 KB to ~45 KB,
+ * and p90 latency from ~7.3s to ~1.4s (the tail was large-payload transfer
+ * jitter, not query time).
+ *
+ * Range filtering moved into the RPC too (p_range_from/p_range_to), matching the
+ * `day < from || day > to` skip this function's caller used to do in JS.
  */
-async function fetchGroupedRows(
+async function fetchHeatmapCompact(
   client: ReturnType<typeof createClient>,
   userId: string,
   requestedDeviceId: string | null,
   fromIso: string,
   toIso: string,
-  trunc: "hour" | "day" | "month" | "none",
+  rangeFrom: string,
+  rangeTo: string,
   tz: string | null,
   tzOffsetMinutes: number | null,
-): Promise<GroupedRow[]> {
-  const cacheKey = JSON.stringify([userId, requestedDeviceId, fromIso, toIso, trunc, tz, tzOffsetMinutes]);
-  const cached = groupedRowsCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < GROUPED_ROWS_TTL_MS) return cached.rows;
-  const existing = groupedRowsInFlight.get(cacheKey);
+): Promise<CompactDay[]> {
+  const cacheKey = JSON.stringify([userId, requestedDeviceId, fromIso, toIso, rangeFrom, rangeTo, tz, tzOffsetMinutes]);
+  const cached = compactCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < COMPACT_TTL_MS) return cached.days;
+  const existing = compactInFlight.get(cacheKey);
   if (existing) return existing;
 
   const pending = (async () => {
     try {
-      const { data, error } = await client.database.rpc("account_usage_grouped_cached", {
+      const { data, error } = await client.database.rpc("account_heatmap_compact", {
         p_user_id: userId,
         p_device_id: requestedDeviceId,
         p_from: fromIso,
         p_to: toIso,
-        p_trunc: trunc,
         p_tz: tz,
         p_offset_min: tzOffsetMinutes,
+        p_range_from: rangeFrom,
+        p_range_to: rangeTo,
       });
       if (error) throw new Error(error.message);
-      const rows = (Array.isArray(data) ? data : []) as GroupedRow[];
-      groupedRowsCache.set(cacheKey, { fetchedAt: Date.now(), rows });
-      if (groupedRowsCache.size > 64) {
-        const oldest = groupedRowsCache.keys().next().value;
-        if (oldest) groupedRowsCache.delete(oldest);
+      const days = (Array.isArray(data) ? data : []) as CompactDay[];
+      compactCache.set(cacheKey, { fetchedAt: Date.now(), days });
+      if (compactCache.size > 64) {
+        const oldest = compactCache.keys().next().value;
+        if (oldest) compactCache.delete(oldest);
       }
-      return rows;
+      return days;
     } catch (error) {
-      const stale = groupedRowsCache.get(cacheKey);
-      if (stale && Date.now() - stale.fetchedAt < GROUPED_ROWS_STALE_IF_ERROR_MS) return stale.rows;
+      const stale = compactCache.get(cacheKey);
+      if (stale && Date.now() - stale.fetchedAt < COMPACT_STALE_IF_ERROR_MS) return stale.days;
       throw error;
     }
-  })().finally(() => groupedRowsInFlight.delete(cacheKey));
-  groupedRowsInFlight.set(cacheKey, pending);
+  })().finally(() => compactInFlight.delete(cacheKey));
+  compactInFlight.set(cacheKey, pending);
   return pending;
 }
 
@@ -222,29 +246,22 @@ export default async function (req: Request): Promise<Response> {
   const rangeStart = startDate.toISOString();
   const rangeEnd = nextDay.toISOString();
 
-  let rows: GroupedRow[];
+  let compactDays: CompactDay[];
   try {
-    rows = await fetchGroupedRows(client, userId, requestedDeviceId, rangeStart, rangeEnd, "day", tz, tzOffsetMinutes);
+    compactDays = await fetchHeatmapCompact(client, userId, requestedDeviceId, rangeStart, rangeEnd, from, to, tz, tzOffsetMinutes);
   } catch (e) {
     return json({ error: (e as Error).message }, 500);
   }
 
   const byDay = new Map<string, { total_tokens: number; billable_total_tokens: number; models: Record<string, number> }>();
-  for (const row of rows) {
-    const day = row.bucket;
-    if (day < from || day > to) continue;
-    let a = byDay.get(day);
-    if (!a) {
-      a = { total_tokens: 0, billable_total_tokens: 0, models: {} };
-      byDay.set(day, a);
-    }
-    const tt = Number(row.total_tokens) || 0;
-    a.total_tokens += tt;
-    a.billable_total_tokens += tt;
+  for (const [day, total, models] of compactDays) {
+    const tt = Number(total) || 0;
     // Per-model totals so the activity-heatmap tooltip can show MODEL breakdown
-    // in cloud mode — mirrors src/lib/local-api.js heatmap cells.
-    const mdl = String(row.model || "unknown");
-    a.models[mdl] = (a.models[mdl] || 0) + tt;
+    // in cloud mode — mirrors src/lib/local-api.js heatmap cells. Postgres folds
+    // a NULL/empty model into "unknown", same as the old String(model || …) did.
+    const mdl: Record<string, number> = {};
+    if (models) for (const name of Object.keys(models)) mdl[name] = Number(models[name]) || 0;
+    byDay.set(day, { total_tokens: tt, billable_total_tokens: tt, models: mdl });
   }
 
   const allValues = Array.from(byDay.values())
@@ -289,5 +306,5 @@ export default async function (req: Request): Promise<Response> {
     active_days: cells.filter((c) => c.billable_total_tokens > 0).length,
     streak_days: 0,
     weeks: weeksArr,
-  });
+  }, 200, req);
 }

@@ -46,22 +46,71 @@ test("user-authenticated edge functions verify current RS256 and legacy HS256 to
   }
 });
 
+// account-summary and account-heatmap read through a per-endpoint compact RPC
+// that folds the rollup into Postgres instead of shipping per-row detail to the
+// edge (migrations/*_fold-account-summary-and-heatmap-aggregation.sql). Those
+// RPCs delegate to account_usage_grouped_cached themselves, so the shared-cache
+// guarantee still holds — it is asserted against the migration below.
+const COMPACT_ACCOUNT_RPCS = new Map([
+  ["tokentracker-account-summary.ts", ["account_summary_compact", "fold-account-summary-and-heatmap-aggregation"]],
+  ["tokentracker-account-heatmap.ts", ["account_heatmap_compact", "fold-account-summary-and-heatmap-aggregation"]],
+  ["tokentracker-account-model-breakdown.ts", ["account_model_breakdown_compact", "fold-account-model-breakdown-aggregation"]],
+  ["tokentracker-account-daily.ts", ["account_daily_compact", "fold-account-daily-aggregation"]],
+]);
+
 test("cloud account reads use the shared cached RPC instead of a device lookup plus aggregation", () => {
   for (const file of ACCOUNT_FUNCTIONS) {
     const source = read(`dashboard/edge-patches/${file}`);
-    assert.match(source, /rpc\("account_usage_grouped_cached"/u,
-      `${file} must use the cross-isolate cached RPC`);
+    const compact = COMPACT_ACCOUNT_RPCS.get(file);
+    if (compact) {
+      assert.match(source, new RegExp(`rpc\\("${compact[0]}"`, "u"),
+        `${file} must read through its compact RPC`);
+    } else {
+      assert.match(source, /rpc\("account_usage_grouped_cached"/u,
+        `${file} must use the cross-isolate cached RPC`);
+    }
     assert.doesNotMatch(
       source,
       /\.from\("tokentracker_devices"\)/u,
       `${file} must not spend a second PostgREST connection resolving devices`,
     );
-    assert.match(source, /const groupedRowsInFlight = new Map/u,
+    // Same coalescing / TTL / stale-fallback contract either way; the compact
+    // readers name the symbols COMPACT_* instead of GROUPED_ROWS_*.
+    assert.match(source, /const (?:groupedRows|compact)InFlight = new Map/u,
       `${file} must coalesce identical concurrent RPC reads`);
-    assert.match(source, /GROUPED_ROWS_TTL_MS = 30_000/u,
+    assert.match(source, /(?:GROUPED_ROWS|COMPACT)_TTL_MS = 30_000/u,
       `${file} must shield the backend from old-client polling storms`);
-    assert.match(source, /GROUPED_ROWS_STALE_IF_ERROR_MS = 5 \* 60_000/u,
+    assert.match(source, /(?:GROUPED_ROWS|COMPACT)_STALE_IF_ERROR_MS = 5 \* 60_000/u,
       `${file} must retain a bounded stale fallback for transient 5xx responses`);
+  }
+});
+
+test("compact account RPCs delegate to the shared cached RPC and stay project_admin-only", () => {
+  const seen = new Map();
+  for (const [rpc, suffix] of COMPACT_ACCOUNT_RPCS.values()) {
+    const migration = readMigrationBySuffix(suffix);
+    seen.set(suffix, migration);
+    assert.match(migration, new RegExp(`CREATE OR REPLACE FUNCTION public\\.${rpc}\\(`, "u"),
+      `${rpc} must be defined in migration *_${suffix}.sql`);
+    // Postgres grants EXECUTE to PUBLIC by default; without this an anon caller
+    // could pass any p_user_id and read another account's usage.
+    assert.match(migration, new RegExp(`REVOKE ALL ON FUNCTION public\\.${rpc}\\([^)]*\\) FROM PUBLIC, anon, authenticated;`, "u"),
+      `${rpc} must revoke the default PUBLIC execute grant`);
+    assert.match(migration, new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${rpc}\\([^)]*\\) TO project_admin;`, "u"),
+      `${rpc} must be executable by project_admin`);
+  }
+  // Every compact RPC must read through the shared 30s cache, never re-scan.
+  const allRpcs = [...COMPACT_ACCOUNT_RPCS.values()].map(([rpc]) => rpc);
+  for (const [suffix, migration] of seen) {
+    const definedHere = allRpcs.filter((rpc) =>
+      new RegExp(`CREATE OR REPLACE FUNCTION public\\.${rpc}\\(`, "u").test(migration)).length;
+    assert.equal(
+      (migration.match(/public\.account_usage_grouped_cached\(/gu) || []).length,
+      definedHere,
+      `each compact RPC in *_${suffix}.sql must delegate to account_usage_grouped_cached exactly once`,
+    );
+    assert.doesNotMatch(migration, /FROM public\.tokentracker_hourly/u,
+      `compact RPCs in *_${suffix}.sql must not bypass the shared cache with their own scan`);
   }
 });
 
@@ -550,4 +599,50 @@ test("unused direct profile-like table grants stay revoked", () => {
     source,
     /REVOKE ALL ON public\.tokentracker_profile_likes FROM anon, authenticated;/u,
   );
+});
+
+// Compression on the bodies large enough to pay for it.
+//
+// Neither the InsForge gateway nor PostgREST negotiate compression, so every
+// byte an edge function serializes is a byte on the wire. These four are the
+// heavy responses: a 52-week heatmap (~65 KB), a leaderboard page (~77 KB), and
+// the per-day / per-model breakdowns (~5-25 KB). Everything that reads them
+// advertises gzip by default — browsers, and Node's fetch, which is what the
+// local CLI uses to proxy every macOS and Windows app request.
+//
+// The second assertion is the one that matters: the helper existing proves
+// nothing if the success path forgets to pass `req`, because the response then
+// silently falls back to identity with no error anywhere. That is exactly the
+// state tokentracker-leaderboard.ts shipped in.
+const GZIPPED_RESPONSES = [
+  "tokentracker-account-heatmap.ts",
+  "tokentracker-account-daily.ts",
+  "tokentracker-account-model-breakdown.ts",
+  "tokentracker-leaderboard.ts",
+];
+
+test("the largest edge responses gzip when the caller advertises it", () => {
+  for (const file of GZIPPED_RESPONSES) {
+    const source = read(`dashboard/edge-patches/${file}`);
+    assert.match(
+      source,
+      /function json\(data: unknown, status = 200, req\?: Request\)/u,
+      `${file} must take the request so it can read accept-encoding`,
+    );
+    assert.match(
+      source,
+      /pipeThrough\(new CompressionStream\("gzip"\)\)/u,
+      `${file} must compress the body rather than only advertising support`,
+    );
+    assert.match(
+      source,
+      /headers\["Vary"\] = "Accept-Encoding"/u,
+      `${file} must vary on Accept-Encoding so a cache cannot serve the wrong encoding`,
+    );
+    assert.match(
+      source,
+      /, 200, req\)|json\(data, 200, req\)/u,
+      `${file} must thread req into its success response, or the helper never fires`,
+    );
+  }
 });

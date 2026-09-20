@@ -12,11 +12,29 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
 };
 
-function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+/**
+ * Pass `req` to let a large body be gzipped when the caller advertises it.
+ *
+ * Same trade as the heatmap endpoint: neither the InsForge gateway nor PostgREST
+ * negotiate compression, so a 30-day window leaves here as ~11 KB of JSON whose
+ * bulk is repeated model names and day keys. gzip takes that to roughly 2 KB.
+ * Callers that do not advertise gzip still get identity, so this cannot break an
+ * older client.
+ */
+function json(data: unknown, status = 200, req?: Request) {
+  const body = JSON.stringify(data);
+  const headers: Record<string, string> = { ...corsHeaders, "Content-Type": "application/json" };
+  const acceptsGzip = (req?.headers.get("accept-encoding") || "").toLowerCase().includes("gzip");
+  // Below ~1 KB the gzip header costs more than it saves.
+  if (acceptsGzip && body.length >= 1024) {
+    headers["Content-Encoding"] = "gzip";
+    headers["Vary"] = "Accept-Encoding";
+    return new Response(
+      new Blob([body]).stream().pipeThrough(new CompressionStream("gzip")),
+      { status, headers },
+    );
+  }
+  return new Response(body, { status, headers });
 }
 
 /**
@@ -545,60 +563,87 @@ interface GroupedRow {
   pricing_tier?: string;
 }
 
-const GROUPED_ROWS_TTL_MS = 30_000;
-const GROUPED_ROWS_STALE_IF_ERROR_MS = 5 * 60_000;
-const groupedRowsCache = new Map<string, { fetchedAt: number; rows: GroupedRow[] }>();
-const groupedRowsInFlight = new Map<string, Promise<GroupedRow[]>>();
+/**
+ * What account_daily_compact() returns.
+ *
+ * `days` carries everything a day needs except its cost; `cost_dims` keeps the
+ * (source, model, pricing_tier) split because pricing depends on it, but the
+ * day's rows are already summed per dim and the JSON key names are gone.
+ */
+interface CompactDaily {
+  // [day, total, input, output, cache_read, cache_write, reasoning,
+  //  conversations, { model: tokens }]
+  days: [string, number | string, number | string, number | string, number | string,
+    number | string, number | string, number | string, Record<string, number | string> | null][];
+  // [day, source, model, pricing_tier, input, output, cache_read, cache_write, reasoning]
+  cost_dims: [string, string | null, string | null, string | null, number | string,
+    number | string, number | string, number | string, number | string][];
+}
+
+const COMPACT_TTL_MS = 30_000;
+const COMPACT_STALE_IF_ERROR_MS = 5 * 60_000;
+const compactCache = new Map<string, { fetchedAt: number; value: CompactDaily }>();
+const compactInFlight = new Map<string, Promise<CompactDaily>>();
 
 /**
- * Server-side aggregation. One RPC replaces the old N paginated 1000-row raw
- * fetches: account_usage_grouped() GROUPs BY (tz-local bucket, source, model)
- * in Postgres and returns a single JSONB array. SUM across the user's active
- * devices is byte-identical to the old in-edge aggregation; tz-local bucketing
- * uses `AT TIME ZONE` (same IANA database as the old JS Intl path, incl. DST).
+ * Server-side aggregation, folded to what this endpoint emits.
+ *
+ * account_daily_compact() runs the very same account_usage_grouped_cached() scan
+ * underneath — same 30s shared Postgres cache, same cross-device dedup — but
+ * rolls each day up in Postgres. Unlike summary/heatmap/model-breakdown, daily
+ * genuinely needs a per-model split (it prints a cost per day), so the win here
+ * is smaller: dropping the repeated JSON key names and pre-summing each day's
+ * rows per dim takes a 30-day window for a heavy account from ~146 KB to ~60 KB
+ * (-59%) rather than -90%.
  */
-async function fetchGroupedRows(
+async function fetchCompactDaily(
   client: ReturnType<typeof createClient>,
   userId: string,
   requestedDeviceId: string | null,
   fromIso: string,
   toIso: string,
-  trunc: "hour" | "day" | "month" | "none",
+  rangeFrom: string,
+  rangeTo: string,
   tz: string | null,
   tzOffsetMinutes: number | null,
-): Promise<GroupedRow[]> {
-  const cacheKey = JSON.stringify([userId, requestedDeviceId, fromIso, toIso, trunc, tz, tzOffsetMinutes]);
-  const cached = groupedRowsCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < GROUPED_ROWS_TTL_MS) return cached.rows;
-  const existing = groupedRowsInFlight.get(cacheKey);
+): Promise<CompactDaily> {
+  const cacheKey = JSON.stringify([userId, requestedDeviceId, fromIso, toIso, rangeFrom, rangeTo, tz, tzOffsetMinutes]);
+  const cached = compactCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < COMPACT_TTL_MS) return cached.value;
+  const existing = compactInFlight.get(cacheKey);
   if (existing) return existing;
 
   const pending = (async () => {
     try {
-      const { data, error } = await client.database.rpc("account_usage_grouped_cached", {
+      const { data, error } = await client.database.rpc("account_daily_compact", {
         p_user_id: userId,
         p_device_id: requestedDeviceId,
         p_from: fromIso,
         p_to: toIso,
-        p_trunc: trunc,
         p_tz: tz,
         p_offset_min: tzOffsetMinutes,
+        p_range_from: rangeFrom,
+        p_range_to: rangeTo,
       });
       if (error) throw new Error(error.message);
-      const rows = (Array.isArray(data) ? data : []) as GroupedRow[];
-      groupedRowsCache.set(cacheKey, { fetchedAt: Date.now(), rows });
-      if (groupedRowsCache.size > 64) {
-        const oldest = groupedRowsCache.keys().next().value;
-        if (oldest) groupedRowsCache.delete(oldest);
+      const payload = (data ?? {}) as Partial<CompactDaily>;
+      const value: CompactDaily = {
+        days: Array.isArray(payload.days) ? payload.days : [],
+        cost_dims: Array.isArray(payload.cost_dims) ? payload.cost_dims : [],
+      };
+      compactCache.set(cacheKey, { fetchedAt: Date.now(), value });
+      if (compactCache.size > 64) {
+        const oldest = compactCache.keys().next().value;
+        if (oldest) compactCache.delete(oldest);
       }
-      return rows;
+      return value;
     } catch (error) {
-      const stale = groupedRowsCache.get(cacheKey);
-      if (stale && Date.now() - stale.fetchedAt < GROUPED_ROWS_STALE_IF_ERROR_MS) return stale.rows;
+      const stale = compactCache.get(cacheKey);
+      if (stale && Date.now() - stale.fetchedAt < COMPACT_STALE_IF_ERROR_MS) return stale.value;
       throw error;
     }
-  })().finally(() => groupedRowsInFlight.delete(cacheKey));
-  groupedRowsInFlight.set(cacheKey, pending);
+  })().finally(() => compactInFlight.delete(cacheKey));
+  compactInFlight.set(cacheKey, pending);
   return pending;
 }
 
@@ -700,9 +745,9 @@ export default async function (req: Request): Promise<Response> {
   const rangeStart = startDate.toISOString();
   const rangeEnd = endDate.toISOString();
 
-  let rows: GroupedRow[];
+  let compact: CompactDaily;
   try {
-    rows = await fetchGroupedRows(client, userId, requestedDeviceId, rangeStart, rangeEnd, "day", tz, tzOffsetMinutes);
+    compact = await fetchCompactDaily(client, userId, requestedDeviceId, rangeStart, rangeEnd, from, to, tz, tzOffsetMinutes);
   } catch (e) {
     return json({ error: (e as Error).message }, 500);
   }
@@ -723,40 +768,50 @@ export default async function (req: Request): Promise<Response> {
     // Without this the trend falls back to a token-type breakdown in cloud mode.
     models: Record<string, number>;
   }>();
-  for (const row of rows) {
-    const day = row.bucket;
-    if (day < from || day > to) continue;
-    let a = byDay.get(day);
-    if (!a) {
-      a = {
-        day,
-        total_tokens: 0,
-        billable_total_tokens: 0,
-        total_cost_usd: 0,
-        input_tokens: 0,
-        output_tokens: 0,
-        cached_input_tokens: 0,
-        cache_creation_input_tokens: 0,
-        reasoning_output_tokens: 0,
-        conversation_count: 0,
-        models: {},
-      };
-      byDay.set(day, a);
-    }
-    const tt = Number(row.total_tokens) || 0;
-    a.total_tokens += tt;
-    a.billable_total_tokens += tt;
-    a.total_cost_usd += computeRowCost(row);
-    a.input_tokens += Number(row.input_tokens) || 0;
-    a.output_tokens += Number(row.output_tokens) || 0;
-    a.cached_input_tokens += Number(row.cached_input_tokens) || 0;
-    a.cache_creation_input_tokens += Number(row.cache_creation_input_tokens) || 0;
-    a.reasoning_output_tokens += Number(row.reasoning_output_tokens) || 0;
-    a.conversation_count += Number(row.conversations) || 0;
-    const mdl = String(row.model || "unknown");
-    a.models[mdl] = (a.models[mdl] || 0) + tt;
+  // Postgres already bucketed to the local day and kept only [from, to] — the
+  // same inclusive range the `day < from || day > to` skip used to enforce —
+  // and folded a NULL/empty model into "unknown" just as String(model || …) did.
+  for (const [day, tt, i, o, cr, cw, rs, cv, models] of compact.days) {
+    const total = Number(tt) || 0;
+    const mdl: Record<string, number> = {};
+    if (models) for (const name of Object.keys(models)) mdl[name] = Number(models[name]) || 0;
+    byDay.set(day, {
+      day,
+      total_tokens: total,
+      billable_total_tokens: total,
+      total_cost_usd: 0,
+      input_tokens: Number(i) || 0,
+      output_tokens: Number(o) || 0,
+      cached_input_tokens: Number(cr) || 0,
+      cache_creation_input_tokens: Number(cw) || 0,
+      reasoning_output_tokens: Number(rs) || 0,
+      conversation_count: Number(cv) || 0,
+      models: mdl,
+    });
+  }
+
+  // Cost stays on the edge because the price table lives here. Each dim is one
+  // day's rows already summed per (source, model, pricing_tier); computeRowCost
+  // is linear in every token column, so adding the dims up per day gives the
+  // same total the per-day rows did.
+  for (const [day, source, model, tier, i, o, cr, cw, rs] of compact.cost_dims) {
+    const a = byDay.get(day);
+    if (!a) continue;
+    a.total_cost_usd += computeRowCost({
+      bucket: day,
+      source: source as string,
+      model: model as string,
+      pricing_tier: tier ?? undefined,
+      input_tokens: Number(i) || 0,
+      output_tokens: Number(o) || 0,
+      cached_input_tokens: Number(cr) || 0,
+      cache_creation_input_tokens: Number(cw) || 0,
+      reasoning_output_tokens: Number(rs) || 0,
+      total_tokens: 0,
+      conversations: 0,
+    });
   }
 
   const data = Array.from(byDay.values()).sort((a, b) => a.day.localeCompare(b.day));
-  return json({ from, to, data });
+  return json({ from, to, data }, 200, req);
 }
