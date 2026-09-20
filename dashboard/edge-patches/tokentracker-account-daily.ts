@@ -13,28 +13,25 @@ const corsHeaders = {
 };
 
 /**
- * Pass `req` to let a large body be gzipped when the caller advertises it.
+ * Kept deliberately plain: do NOT add Content-Encoding here.
  *
- * Same trade as the heatmap endpoint: neither the InsForge gateway nor PostgREST
- * negotiate compression, so a 30-day window leaves here as ~11 KB of JSON whose
- * bulk is repeated model names and day keys. gzip takes that to roughly 2 KB.
- * Callers that do not advertise gzip still get identity, so this cannot break an
- * older client.
+ * This endpoint carried a gzip branch for a while (body over 1 KB and a caller
+ * advertising gzip got a compressed stream). It never reached a client. The
+ * InsForge gateway decompresses an encoded edge response and forwards it as
+ * identity: `Vary: Accept-Encoding` is passed through, `Content-Encoding` is
+ * stripped, and both `Content-Length` and the ETag are computed over the plain
+ * body. Verified end to end on 2026-09-20 against the public leaderboard
+ * endpoint with cache-busted requests: 77529 bytes on the wire either way, and
+ * a body starting with `{"en` rather than the gzip magic 1f 8b.
+ *
+ * So compressing here only burns CPU twice. The way to shrink these responses
+ * is fewer bytes (the *_compact RPCs) or fewer requests (client-side caches).
  */
-function json(data: unknown, status = 200, req?: Request) {
-  const body = JSON.stringify(data);
-  const headers: Record<string, string> = { ...corsHeaders, "Content-Type": "application/json" };
-  const acceptsGzip = (req?.headers.get("accept-encoding") || "").toLowerCase().includes("gzip");
-  // Below ~1 KB the gzip header costs more than it saves.
-  if (acceptsGzip && body.length >= 1024) {
-    headers["Content-Encoding"] = "gzip";
-    headers["Vary"] = "Accept-Encoding";
-    return new Response(
-      new Blob([body]).stream().pipeThrough(new CompressionStream("gzip")),
-      { status, headers },
-    );
-  }
-  return new Response(body, { status, headers });
+function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
 }
 
 /**
@@ -813,5 +810,5 @@ export default async function (req: Request): Promise<Response> {
   }
 
   const data = Array.from(byDay.values()).sort((a, b) => a.day.localeCompare(b.day));
-  return json({ from, to, data }, 200, req);
+  return json({ from, to, data });
 }

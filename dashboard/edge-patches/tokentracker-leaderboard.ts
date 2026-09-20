@@ -34,39 +34,33 @@ const BLOCKED_LEADERBOARD_USER_IDS = new Set(
 );
 
 /**
- * Pass `req` to let a large body be gzipped when the caller advertises it.
+ * Kept deliberately plain: do NOT add Content-Encoding here.
  *
- * Same trade as the heatmap endpoint: neither the InsForge gateway nor PostgREST
- * negotiate compression, so a 100-row page leaves here as ~77 KB of JSON that is
- * mostly repeated field names and badge keys — this is the heaviest single
- * response the public site loads. Callers that do not advertise gzip still get
- * identity, so this cannot break an older client.
+ * This endpoint carried a gzip branch for a while (body over 1 KB and a caller
+ * advertising gzip got a compressed stream). It never reached a client. The
+ * InsForge gateway decompresses an encoded edge response and forwards it as
+ * identity: `Vary: Accept-Encoding` is passed through, `Content-Encoding` is
+ * stripped, and both `Content-Length` and the ETag are computed over the plain
+ * body. Verified end to end on 2026-09-20 against the public leaderboard
+ * endpoint with cache-busted requests: 77529 bytes on the wire either way, and
+ * a body starting with `{"en` rather than the gzip magic 1f 8b.
  *
- * Compression is orthogonal to the no-store headers below: those keep a stale
- * snapshot from being served, they do not govern how the fresh one is encoded.
+ * So compressing here only burns CPU twice. The way to shrink these responses
+ * is fewer bytes (the *_compact RPCs) or fewer requests (client-side caches).
  */
-function json(data: unknown, status = 200, req?: Request) {
-  const body = JSON.stringify(data);
-  const headers: Record<string, string> = {
-    ...cors,
-    "Content-Type": "application/json",
-    // A leaderboard response is a view of a mutable snapshot. Caching the
-    // edge response makes a freshly refreshed snapshot invisible until the
-    // browser/CDN TTL expires.
-    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-    "CDN-Cache-Control": "no-store",
-  };
-  const acceptsGzip = (req?.headers.get("accept-encoding") || "").toLowerCase().includes("gzip");
-  // Below ~1 KB the gzip header costs more than it saves.
-  if (acceptsGzip && body.length >= 1024) {
-    headers["Content-Encoding"] = "gzip";
-    headers["Vary"] = "Accept-Encoding";
-    return new Response(
-      new Blob([body]).stream().pipeThrough(new CompressionStream("gzip")),
-      { status, headers },
-    );
-  }
-  return new Response(body, { status, headers });
+function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      ...cors,
+      "Content-Type": "application/json",
+      // A leaderboard response is a view of a mutable snapshot. Caching the
+      // edge response makes a freshly refreshed snapshot invisible until the
+      // browser/CDN TTL expires.
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      "CDN-Cache-Control": "no-store",
+    },
+  });
 }
 
 /**
@@ -259,5 +253,5 @@ export default async function (req: Request): Promise<Response> {
     from: from_day,
     to: to_day,
     generated_at: snapshotGeneratedAt,
-  }, 200, req);
+  });
 }

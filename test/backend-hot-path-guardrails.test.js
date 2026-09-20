@@ -601,48 +601,38 @@ test("unused direct profile-like table grants stay revoked", () => {
   );
 });
 
-// Compression on the bodies large enough to pay for it.
+// Do not reintroduce Content-Encoding in an edge function.
 //
-// Neither the InsForge gateway nor PostgREST negotiate compression, so every
-// byte an edge function serializes is a byte on the wire. These four are the
-// heavy responses: a 52-week heatmap (~65 KB), a leaderboard page (~77 KB), and
-// the per-day / per-model breakdowns (~5-25 KB). Everything that reads them
-// advertises gzip by default — browsers, and Node's fetch, which is what the
-// local CLI uses to proxy every macOS and Windows app request.
+// The obvious read of these endpoints is that the big ones should gzip: a
+// 52-week heatmap serializes ~65 KB and a leaderboard page ~77 KB of highly
+// repetitive JSON, and every caller advertises gzip by default. That branch was
+// written twice and shipped once, and it never reached a client.
 //
-// The second assertion is the one that matters: the helper existing proves
-// nothing if the success path forgets to pass `req`, because the response then
-// silently falls back to identity with no error anywhere. That is exactly the
-// state tokentracker-leaderboard.ts shipped in.
-const GZIPPED_RESPONSES = [
-  "tokentracker-account-heatmap.ts",
-  "tokentracker-account-daily.ts",
-  "tokentracker-account-model-breakdown.ts",
-  "tokentracker-leaderboard.ts",
-];
-
-test("the largest edge responses gzip when the caller advertises it", () => {
-  for (const file of GZIPPED_RESPONSES) {
+// The InsForge gateway decompresses an encoded edge response and forwards it as
+// identity. Measured end to end on 2026-09-20 against the public leaderboard
+// endpoint, cache-busted, with and without `Accept-Encoding: gzip`: 77529 bytes
+// on the wire both times, `Vary: Accept-Encoding` passed through but
+// `Content-Encoding` stripped, `Content-Length` and the ETag both computed over
+// the plain body, and the body itself starting `{"en` rather than the gzip
+// magic 1f 8b.
+//
+// So the compression cost is paid twice and saves nothing. Shrink these
+// responses by sending fewer bytes (the *_compact RPCs above) or fewer requests
+// (the CLI and tray caches). If the gateway ever starts passing an encoding
+// through, delete this test along with the change that proves it.
+test("edge functions do not compress their own responses", () => {
+  const edgeDir = path.join(ROOT, "dashboard/edge-patches");
+  for (const file of fs.readdirSync(edgeDir).filter((name) => name.endsWith(".ts"))) {
     const source = read(`dashboard/edge-patches/${file}`);
-    assert.match(
+    assert.doesNotMatch(
       source,
-      /function json\(data: unknown, status = 200, req\?: Request\)/u,
-      `${file} must take the request so it can read accept-encoding`,
+      /new CompressionStream\(/u,
+      `${file} must not compress: the gateway decompresses it again (see comment above)`,
     );
-    assert.match(
+    assert.doesNotMatch(
       source,
-      /pipeThrough\(new CompressionStream\("gzip"\)\)/u,
-      `${file} must compress the body rather than only advertising support`,
-    );
-    assert.match(
-      source,
-      /headers\["Vary"\] = "Accept-Encoding"/u,
-      `${file} must vary on Accept-Encoding so a cache cannot serve the wrong encoding`,
-    );
-    assert.match(
-      source,
-      /, 200, req\)|json\(data, 200, req\)/u,
-      `${file} must thread req into its success response, or the helper never fires`,
+      /"Content-Encoding"\]?\s*[:=]/u,
+      `${file} must not set Content-Encoding: the gateway strips it (see comment above)`,
     );
   }
 });
