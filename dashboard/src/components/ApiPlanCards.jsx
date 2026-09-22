@@ -173,7 +173,7 @@ export function ApiPlanCards({ apiPlans }) {
   return (
     <div className="mb-8">
       <div className="flex items-center justify-between gap-3 mb-3">
-        <h2 className="text-lg font-semibold text-oai-black dark:text-white">API 直连套餐</h2>
+        <h2 className="text-lg font-semibold text-oai-black dark:text-white">API 直连大模型 Token Plan 套餐</h2>
         <button
           type="button"
           onClick={() => void save()}

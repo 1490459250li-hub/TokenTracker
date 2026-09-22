@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { LimitsSettingsPanel } from "../components/LimitsSettingsPanel.jsx";
 import { AppearanceSection } from "../components/settings/AppearanceSection.jsx";
 import { LabsSection } from "../components/settings/LabsSection.jsx";
-import { ApiDirectSection } from "../components/settings/ApiDirectSection.jsx";
+// ApiDirectSection 已迁移到「限额」页挂载（见 LimitsPage.jsx）
 import {
   SectionCard,
   SegmentedControl,
@@ -103,14 +103,7 @@ export function SettingsPage() {
         }]
       : []),
     // 账户分区已移除（本 fork 无登录/云账号）
-    {
-      id: SETTINGS_SECTION_IDS.API_DIRECT,
-      label: "API 直连",
-      description: "DeepSeek / MiMo / 日日新的 Key、模型单价与本地记账代理状态。",
-      group: SETTINGS_GROUP_IDS.APP,
-      Icon: Globe,
-      content: <ApiDirectSection />,
-    },
+    // API 直连分区已迁移到「限额」页（key 管理/单价/连接测试与套餐卡片同页管理）
     {
       id: SETTINGS_SECTION_IDS.LIMITS,
       label: copy("settings.section.limits"),

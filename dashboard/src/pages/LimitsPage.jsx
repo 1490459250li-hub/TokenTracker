@@ -17,6 +17,7 @@ import { sendPredictiveLimitAlerts } from "../lib/limit-alerts.js";
 import { isNativeEmbed, postNativeMessage } from "../lib/native-bridge.js";
 import { listSubscriptions } from "../lib/subscription-manager-api";
 import { ApiPlanCards } from "../components/ApiPlanCards.jsx";
+import { ApiDirectSection } from "../components/settings/ApiDirectSection.jsx";
 
 const IS_LOCAL_HOST =
   typeof window !== "undefined" &&
@@ -183,6 +184,13 @@ export function LimitsPage() {
           </div>
 
           <ApiPlanCards apiPlans={usageLimits?.apiPlans} />
+
+          {/* API 直连管理（自设置页迁移）：key 管理 / 连接测试 / 模型单价，与套餐卡片同页管理 */}
+          <div className="mb-8">
+            <h2 className="text-lg font-semibold text-oai-black dark:text-white mb-3">API 直连管理</h2>
+            <ApiDirectSection />
+          </div>
+
           {isLoading ? (
             <LimitsPageSkeleton />
           ) : (
