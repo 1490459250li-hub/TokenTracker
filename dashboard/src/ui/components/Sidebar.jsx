@@ -6,7 +6,7 @@ import {
   History,
   LayoutGrid,
   PawPrint,
-  Globe,
+  // Globe: unused while ip-check is hidden from the nav (route stays live).
   Puzzle,
   Activity,
   Settings as SettingsIcon,
@@ -48,7 +48,9 @@ export function getNavGroups() {
         { id: "widgets", to: "/widgets", icon: LayoutGrid, label: copy("nav.widgets") },
         { id: "pet", to: "/pet-settings", icon: PawPrint, label: copy("nav.pet") },
         { id: "skills", to: "/skills", icon: Puzzle, label: copy("nav.skills") },
-        { id: "ip-check", to: "/ip-check", icon: Globe, label: copy("nav.ip_check") },
+        // ip-check hidden from the sidebar for single-user local use; the
+        // /ip-check route and IpCheckPage stay mounted (reachable by URL).
+        // { id: "ip-check", to: "/ip-check", icon: Globe, label: copy("nav.ip_check") },
         { id: "service-status", to: "/service-status", icon: Activity, label: copy("nav.service_status") },
       ],
     },

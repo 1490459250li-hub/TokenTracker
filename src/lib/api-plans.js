@@ -146,11 +146,16 @@ function buildMimoCard(events, budgets, nowMs) {
   let creditsUsed = 0;
   let tokensThisMonth = 0;
   const byModel = {};
+  // 迷你趋势线：本月按日的 Credits 消耗（本地时区，到今天为止）
+  const today = new Date(nowMs);
+  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+  const dailyCredits = new Array(daysInMonth).fill(0);
   for (const ev of events) {
     if (ev.source !== "mimo-api" || ev.ts < monthStartMs) continue;
     const multiplier = Number(multipliers[ev.model] ?? defaultMultiplier) || defaultMultiplier;
     const credits = (Number(ev.total_tokens) || 0) * multiplier;
     creditsUsed += credits;
+    dailyCredits[new Date(ev.ts).getDate() - 1] += credits;
     tokensThisMonth += Number(ev.total_tokens) || 0;
     const entry = byModel[ev.model] || { credits: 0, tokens: 0 };
     entry.credits += credits;
@@ -163,6 +168,7 @@ function buildMimoCard(events, budgets, nowMs) {
     plan_presets: budgets.presets.mimo,
     plan_credits: planCredits,
     credits_used: Math.round(creditsUsed),
+    daily_credits: dailyCredits.map((v) => Math.round(v)),
     credits_remaining: planCredits > 0 ? Math.max(0, planCredits - Math.round(creditsUsed)) : null,
     tokens_this_month: tokensThisMonth,
     by_model: byModel,
@@ -175,11 +181,19 @@ function buildSenseNovaCard(events, budgets, nowMs) {
   const windowHours = Number(budgets.sensenova.windowHours) || SENSENOVA_DEFAULT_WINDOW_HOURS;
   const windowMs = windowHours * 60 * 60 * 1000;
   const byModel = {};
+  // 迷你趋势线：当前窗口内按 30 分钟分桶的调用次数
+  const bucketMs = 30 * 60 * 1000;
+  const bucketCount = Math.max(1, Math.ceil(windowMs / bucketMs));
+  const callsBuckets = new Array(bucketCount).fill(0);
   for (const ev of events) {
     if (ev.source !== "sensenova-api") continue;
     const model = ev.model;
     const entry = byModel[model] || { calls: 0, tokens: 0, last_ts: 0, pool: null };
-    if (ev.ts >= nowMs - windowMs) entry.calls += 1;
+    if (ev.ts >= nowMs - windowMs) {
+      entry.calls += 1;
+      const bucket = Math.min(bucketCount - 1, Math.floor((nowMs - ev.ts) / bucketMs));
+      callsBuckets[bucketCount - 1 - bucket] += 1;
+    }
     entry.tokens += Number(ev.total_tokens) || 0;
     if (ev.ts > entry.last_ts) entry.last_ts = ev.ts;
     // 归属积分池：模型名含 flash-lite 走专属池，其余走通用池
@@ -207,6 +221,7 @@ function buildSenseNovaCard(events, budgets, nowMs) {
     configured: models.length > 0,
     window_hours: windowHours,
     unit: "calls",
+    calls_trend_30m: callsBuckets,
     pools: {
       general: Number(budgets.sensenova.callsPerWindow) || SENSENOVA_DEFAULT_CALLS,
       flashlite: Number(budgets.sensenova.flashliteCallsPerWindow) || SENSENOVA_DEFAULT_CALLS,
@@ -245,6 +260,27 @@ async function buildDeepSeekCard(events, budgets, nowMs) {
     requestsToday += 1;
   }
   const budgetUsd = Number(budgets.deepseek.budgetUsd) || 0;
+  // 迷你趋势线：今天按小时的花费（本地时区 24 桶，当前小时为最后非空桶）
+  const hourlySpend = new Array(24).fill(0);
+  for (const ev of events) {
+    if (ev.source !== "deepseek-api") continue;
+    if (ev.ts < dayStart.getTime()) continue;
+    const row = {
+      source: "deepseek-api",
+      model: ev.model,
+      hour_start: new Date(ev.ts).toISOString(),
+      input_tokens: Number(ev.input_tokens) || 0,
+      output_tokens: Number(ev.output_tokens) || 0,
+      cached_input_tokens: Number(ev.cached_input_tokens) || 0,
+      cache_creation_input_tokens: Number(ev.cache_creation_input_tokens) || 0,
+      reasoning_output_tokens: Number(ev.reasoning_output_tokens) || 0,
+    };
+    try {
+      hourlySpend[new Date(ev.ts).getHours()] += computeRowCost(row);
+    } catch {
+      /* pricing unavailable */
+    }
+  }
   // 官方余额（best-effort：key 缺失/网络失败时保持 null，卡片显示占位）
   let balance = null;
   let balanceCurrency = null;
@@ -274,6 +310,7 @@ async function buildDeepSeekCard(events, budgets, nowMs) {
     balance_currency: balanceCurrency,
     budget_usd: budgetUsd || null,
     spend_today_usd: Math.round(spendToday * 1e6) / 1e6,
+    hourly_spend_usd: hourlySpend.map((v) => Math.round(v * 1e6) / 1e6),
     tokens_today: tokensToday,
     requests_today: requestsToday,
     last_activity_ts: lastActivityTs || null,

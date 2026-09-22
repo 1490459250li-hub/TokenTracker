@@ -421,6 +421,10 @@ const PROVIDER_LOGO_MAP = {
   LMSTUDIO: "/brand-logos/lmstudio.svg",
   MIMO: "/brand-logos/mimo.svg",
   "MIMO-API": "/brand-logos/mimo.svg",
+  // SenseNova (商汤日日新): brand-style blue gradient mark, same asset for the
+  // native source and the api-shim direct-connect source.
+  SENSENOVA: "/brand-logos/sensenova.svg",
+  "SENSENOVA-API": "/brand-logos/sensenova.svg",
   // oh-my-pi: multi-color brand mark (pi letterform + plugin connector). pi
   // itself publishes a white-only mark (pi.dev/logo.svg), so it gets the same
   // <img> luminance treatment as AnythingLLM in PROVIDER_LOGO_CLASS_MAP.

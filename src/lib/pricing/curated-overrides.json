@@ -4,7 +4,7 @@
     "units": "usd_per_million_tokens",
     "deepseek_v4_pricing_note": "Official DeepSeek V4 pricing verified on 2026-08-21. Peak hours are 01:00-04:00 and 06:00-10:00 UTC; all other hours are off-peak at half price. Exact entries store peak rates. computeRowCost applies the time-of-use discount from each row's UTC hour_start.",
     "iflytek_maas_pricing_note": "iFlytek MaaS inference prices supplied for AStudio on 2026-08-31. AStudio homepage: https://agent.xfyun.cn/. Official pricing source: https://maas.xfyun.cn/modelSquare. Source values are RMB per million tokens, converted at 7.2 RMB/USD, then rounded to two decimal places for billing. Models without a dedicated cache-hit price use the normal input rate; cache writes also use the normal input rate. iFlytek MaaS prices are source-scoped and do not inherit DeepSeek time-of-use discounts.",
-    "user_pending_note": "用户待填占位（本 fork）：以下条目单价为 0 占位——请查平台控制台后填入真实 input/output 单价（USD/百万 token）。删除条目则回退 LiteLLM 定价。"
+    "user_pending_note": "本 fork 补充定价说明：MiMo 系列单价已按官方定价页 https://mimo.mi.com/docs/zh-CN/pricing（2026-09-21 更新）内置美元牌价（input=未命中缓存输入，cache_read=命中缓存，cache_write=0 因官方缓存写入限时免费）；日日新 Token Plan 为官方 0 元公测档（按次数计费，无 token 单价），保持 0 值。汇率换算参考官方海外美元牌价，避免二次换算误差。"
   },
   "exact": {
     "claude-fable-5": {
@@ -420,28 +420,54 @@
       "note": "Alias for free Build SKU as labeled in Grok updates.jsonl modelUsage. Canonical storage id is grok-build-free."
     },
     "mimo-v2.5": {
-      "input": 0,
-      "output": 0,
-      "cache_read": 0,
+      "input": 0.14,
+      "output": 0.28,
+      "cache_read": 0.0028,
       "cache_write": 0,
-      "note": "TODO 用户填：小米 MiMo-V2.5 官方单价"
+      "note": "Xiaomi MiMo-V2.5 (= mimo-v2.6-flash tier). Official pricing https://mimo.mi.com/docs/zh-CN/pricing (2026-09-21): RMB 0.02 cache-hit / 1.00 input / 2.00 output per MTok; overseas USD list $0.0028/$0.14/$0.28. Cache write is currently free (限时免费). V2.5 ships 2026-10-21 下线, replaced by mimo-v2.6-flash at identical rates."
     },
     "mimo-v2.5-pro": {
-      "input": 0,
-      "output": 0,
-      "cache_read": 0,
+      "input": 0.435,
+      "output": 0.87,
+      "cache_read": 0.0036,
       "cache_write": 0,
-      "note": "TODO 用户填：MiMo-V2.5-Pro 单价"
+      "note": "Xiaomi MiMo-V2.5-Pro (= mimo-v2.6-pro tier). Official pricing (2026-09-21): RMB 0.025 cache-hit / 3.00 input / 6.00 output per MTok; overseas USD list $0.0036/$0.435/$0.87. Cache write free. V2.5-Pro 下线 2026-10-21."
+    },
+    "mimo-v2.6-flash": {
+      "input": 0.14,
+      "output": 0.28,
+      "cache_read": 0.0028,
+      "cache_write": 0,
+      "note": "Xiaomi MiMo-V2.6-Flash, released 2026-09-22 at V2.5 prices (官方：智能提升，价格不变). Same rates as mimo-v2.5."
+    },
+    "mimo-v2.6-pro": {
+      "input": 0.435,
+      "output": 0.87,
+      "cache_read": 0.0036,
+      "cache_write": 0,
+      "note": "Xiaomi MiMo-V2.6-Pro, released 2026-09-22 at V2.5-Pro prices. Same rates as mimo-v2.5-pro."
+    },
+    "mimo-v2.6-pro-ultraspeed": {
+      "input": 4.35,
+      "output": 8.7,
+      "cache_read": 0.036,
+      "cache_write": 0,
+      "note": "Xiaomi MiMo-V2.6-Pro-UltraSpeed (10x speed tier). Official USD list $0.036/$4.35/$8.7 per MTok."
     },
     "sensenova-6.7-flash-lite": {
       "input": 0,
       "output": 0,
-      "note": "公测期免费，转付费后填官方单价"
+      "note": "SenseNova Token Plan Free 公测档官方 0 元/月（商汤 FAQ 2026-08-27 核实；限每模型每 5 小时 1500 次调用）。按量 token 单价官方未公布，Lite/Pro 付费档上线后更新。"
     },
     "sensenova-6.8-flash-lite": {
       "input": 0,
       "output": 0,
-      "note": "公测期免费，转付费后填官方单价"
+      "note": "SenseNova Token Plan Free 公测档官方 0 元/月（商汤 FAQ 2026-08-27 核实；限每模型每 5 小时 1500 次调用）。按量 token 单价官方未公布，Lite/Pro 付费档上线后更新。"
+    },
+    "sensenova-u1-fast": {
+      "input": 0,
+      "output": 0,
+      "note": "SenseNova U1 Fast（信息图生成模型，走 /v1/images/generations）。Token Plan Free 公测档官方 0 元/月，同样 1500 次/5 小时。"
     }
   },
   "alias": {

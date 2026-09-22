@@ -11,9 +11,28 @@
 # macOS/web builds stay byte-identical):
 #   $env:TOKENTRACKER_BUILD_PET = "1"; npm run dashboard:build   (from the repo root)
 # ──────────────────────────────────────────────
-param([switch]$Clean)
+param([switch]$Clean, [switch]$SkipDashboardBuild)
 
 $ErrorActionPreference = 'Stop'
+
+# ── Auto-build the dashboard first (fixes "fresh exe, stale UI") ──
+# The pet entry must be included (TOKENTRACKER_BUILD_PET=1) because the
+# Windows tray's PetWindow serves dashboard/pet.html. Skip with
+# -SkipDashboardBuild when you know dist/ is already current.
+if (-not $SkipDashboardBuild) {
+    $ScriptDir0 = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $dashDir = Join-Path (Split-Path -Parent (Split-Path -Parent $ScriptDir0)) 'dashboard'
+    if (-not (Test-Path $dashDir)) { Write-Error "dashboard directory not found at $dashDir" }
+    Write-Host "Building dashboard (TOKENTRACKER_BUILD_PET=1)..."
+    Push-Location $dashDir
+    try {
+        $env:TOKENTRACKER_BUILD_PET = '1'
+        & npm run build
+        if ($LASTEXITCODE -ne 0) { Write-Error "dashboard build failed (exit $LASTEXITCODE)" }
+    } finally {
+        Pop-Location
+    }
+}
 
 # Keep this pinned version in sync with TokenTrackerBar/scripts/bundle-node.sh.
 $ExpectedNodeVersion = '22.22.2'

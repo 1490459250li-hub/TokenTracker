@@ -3163,6 +3163,56 @@ function createLocalApiHandler({ queuePath }) {
       }
     }
 
+    // --- api-shim key 连接测试（本 fork：设置页测试按钮，对上游发最小请求）---
+    if (p === "/functions/tokentracker-api-keys-test" && req.method === "POST") {
+      if (!isAuthorizedLocalMutation(req)) { json(res, { error: "unauthorized" }, 403); return true; }
+      const fsSync = require("node:fs");
+      const pathMod = require("node:path");
+      const osMod = require("node:os");
+      const configFile = pathMod.join(osMod.homedir(), ".tokentracker", "api-shim", "config.json");
+      const body = await readJsonBody(req).catch(() => ({}));
+      const upstreamKey = String(body.upstream || "");
+      const ALLOWED = new Set(["deepseek", "mimo", "sensenova"]);
+      if (!ALLOWED.has(upstreamKey)) { json(res, { ok: false, error: "unknown upstream" }, 400); return true; }
+      try {
+        const conf = JSON.parse(fsSync.readFileSync(configFile, "utf8")) || {};
+        const upstream = conf.upstreams?.[upstreamKey];
+        const apiKey = String(upstream?.api_key || "").trim();
+        if (!upstream || !apiKey) { json(res, { ok: false, error: "key 未配置" }); return true; }
+        const base = String(upstream.base_url || "").replace(/\/+$/, "");
+        if (!base) { json(res, { ok: false, error: "base_url 未配置" }); return true; }
+        // 上游各有零成本的探活路径：DeepSeek 余额接口、MiMo/日日新 models 列表
+        const probe = upstreamKey === "deepseek"
+          ? { url: "https://api.deepseek.com/user/balance", headers: { Authorization: `Bearer ${apiKey}` }, timeout: 8000 }
+          : { url: `${base}/models`, headers: { Authorization: `Bearer ${apiKey}` }, timeout: 8000 };
+        const started = Date.now();
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), probe.timeout);
+        let status = 0;
+        let httpError = "";
+        try {
+          const r = await fetch(probe.url, { headers: probe.headers, signal: ctl.signal });
+          status = r.status;
+          if (!r.ok) httpError = (await r.text().catch(() => "")).slice(0, 200);
+        } catch (e) {
+          clearTimeout(timer);
+          json(res, { ok: false, error: `网络错误：${e?.name === "AbortError" ? "超时" : (e?.message || String(e))}`, status: 0, duration_ms: Date.now() - started });
+          return true;
+        }
+        clearTimeout(timer);
+        const durationMs = Date.now() - started;
+        if (status >= 200 && status < 300) {
+          json(res, { ok: true, status, duration_ms: durationMs });
+        } else {
+          json(res, { ok: false, status, duration_ms: durationMs, error: `HTTP ${status}${httpError ? " · " + httpError : ""}` });
+        }
+        return true;
+      } catch (e) {
+        json(res, { ok: false, error: e?.message || "Unknown error" }, 500);
+        return true;
+      }
+    }
+
     // --- api-shim pricing（本 fork：用户模型单价覆盖读写）---
     if (p === "/functions/tokentracker-api-pricing") {
       const plans = require("./api-plans");

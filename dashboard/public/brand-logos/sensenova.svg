@@ -1,0 +1,17 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="snbg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B2A6B"/>
+      <stop offset="1" stop-color="#0E5BD8"/>
+    </linearGradient>
+    <linearGradient id="snorb" x1="160" y1="120" x2="360" y2="400" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7FD0FF"/>
+      <stop offset="1" stop-color="#2E7BFF"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#snbg)"/>
+  <path d="M256 104c-79.5 0-144 60.9-144 136 0 42.5 21.4 80.3 54.8 105.2l-18.4 42.4c-2.9 6.7 3.9 13.4 10.5 10.4l44.9-20.3c16.3 5.5 33.9 8.5 52.2 8.5 79.5 0 144-60.9 144-136S335.5 104 256 104z" fill="url(#snorb)"/>
+  <circle cx="256" cy="240" r="88" fill="#0B1B4D"/>
+  <path d="M214 272l42-72 42 72h-30l-12-22-12 22h-30z" fill="#fff"/>
+  <path d="M256 320c-30.9 0-58.4 10.7-76.9 27.4C204.9 364.4 229 374 256 374s51.1-9.6 76.9-26.6C314.4 330.7 286.9 320 256 320z" fill="#9FE0FF" opacity="0.55"/>
+</svg>

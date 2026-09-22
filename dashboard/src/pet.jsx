@@ -386,9 +386,10 @@ function PlanBars({ plans, fetchedAt }) {
   for (const m of plans?.plans?.sensenova?.models || []) {
     if (!m.limit || m.limit <= 0) continue;
     const pct = Math.min(100, ((m.calls_in_window || 0) / m.limit) * 100);
+    const poolTag = m.pool === "flashlite" ? "Flash-Lite 池" : "通用池";
     items.push({
       key: `sensenova-api/${m.model}`,
-      label: `SENSENOVA · ${m.model} · ${m.calls_in_window}/${m.limit} 次`,
+      label: `SENSENOVA · ${m.model} · ${m.calls_in_window}/${m.limit} 次（${poolTag}）`,
       pct,
       lastTs: planTsToMs(m.last_activity_ts),
     });

@@ -59,10 +59,41 @@ function pctColor(pct) {
   return "text-emerald-600 dark:text-emerald-400";
 }
 
+/**
+ * 迷你趋势线（纯 SVG，零依赖）。
+ * values: 数字数组（时间从左到右）；空数据或全 0 时返回 null 不占位。
+ */
+function Sparkline({ values, label, strokeClass }) {
+  const data = Array.isArray(values) ? values.filter((v) => Number.isFinite(v)) : [];
+  const hasData = data.length >= 2 && data.some((v) => v > 0);
+  if (!hasData) return null;
+  const w = 100;
+  const h = 26;
+  const max = Math.max(...data);
+  const step = w / (data.length - 1);
+  // 面积 + 描边，贴合卡片轻量风格
+  const pts = data.map((v, i) => `${(i * step).toFixed(2)},${(h - 2 - (max > 0 ? (v / max) * (h - 6) : 0)).toFixed(2)}`);
+  const line = `M ${pts.join(" L ")}`;
+  const area = `${line} L ${w},${h} L 0,${h} Z`;
+  return (
+    <div className="pt-1">
+      <div className="flex justify-between text-[10px] text-oai-gray-400 dark:text-oai-gray-500 mb-0.5">
+        <span>{label}</span>
+        <span>峰值 {formatTokens(max)}</span>
+      </div>
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-[26px]" preserveAspectRatio="none" aria-hidden="true">
+        <path d={area} fill="currentColor" className={strokeClass} opacity="0.12" />
+        <path d={line} fill="none" stroke="currentColor" className={strokeClass} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+      </svg>
+    </div>
+  );
+}
+
 export function ApiPlanCards({ apiPlans }) {
   const [budgets, setBudgets] = useState(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  const [toast, setToast] = useState(null); // { kind: "ok" | "err", msg }
   const [draft, setDraft] = useState(null);
 
   const loadBudgets = useCallback(async () => {
@@ -81,17 +112,28 @@ export function ApiPlanCards({ apiPlans }) {
     if (IS_LOCAL_HOST) void loadBudgets();
   }, [loadBudgets]);
 
+  // toast 自动消失（3 秒）
+  useEffect(() => {
+    if (!toast) return undefined;
+    const t = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
   const save = useCallback(async () => {
     if (!draft) return;
     setSaving(true);
     try {
-      await fetch("/functions/tokentracker-api-plans", {
+      const res = await fetch("/functions/tokentracker-api-plans", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(draft),
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setSavedAt(new Date());
       setBudgets(JSON.parse(JSON.stringify(draft)));
+      setToast({ kind: "ok", msg: "套餐设置已保存" });
+    } catch (err) {
+      setToast({ kind: "err", msg: `保存失败：${String(err && err.message ? err.message : err)}` });
     } finally {
       setSaving(false);
     }
@@ -142,6 +184,19 @@ export function ApiPlanCards({ apiPlans }) {
         </button>
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {toast ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className={`fixed bottom-6 right-6 z-50 rounded-lg px-4 py-2.5 text-sm font-medium shadow-lg border ${
+              toast.kind === "ok"
+                ? "bg-emerald-50 dark:bg-emerald-950 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-300"
+                : "bg-red-50 dark:bg-red-950 border-red-300 dark:border-red-700 text-red-700 dark:text-red-300"
+            }`}
+          >
+            {toast.msg}
+          </div>
+        ) : null}
         <Card icon="DEEPSEEK-API" title="DeepSeek" subtitle="按量计费 · 余额与预算" link="https://platform.deepseek.com">
           <div className="space-y-2.5 text-sm">
             <div className="flex justify-between">
@@ -179,6 +234,7 @@ export function ApiPlanCards({ apiPlans }) {
                 </div>
               </div>
             ) : null}
+            <Sparkline values={deepseek.hourly_spend_usd} label="今日花费走势（按小时）" strokeClass="text-emerald-500" />
           </div>
         </Card>
 
@@ -227,6 +283,7 @@ export function ApiPlanCards({ apiPlans }) {
             <p className="text-[11px] text-oai-gray-400 dark:text-oai-gray-500 leading-relaxed">
               Credits = token × 模型倍率（默认 1x，可在 budgets.json 的 multipliers 中按模型覆盖，官方：Pro 2x/4x）
             </p>
+            <Sparkline values={mimo.daily_credits} label="本月 Credits 消耗（按日）" strokeClass="text-emerald-500" />
           </div>
         </Card>
 
@@ -287,6 +344,7 @@ export function ApiPlanCards({ apiPlans }) {
                 尚无调用记录。把客户端 base_url 指向 shim 的 /sensenova/v1 后，这里会显示各模型窗口用量。
               </p>
             )}
+            <Sparkline values={sensenova.calls_trend_30m} label="窗口内调用走势（30 分钟/格）" strokeClass="text-emerald-500" />
           </div>
         </Card>
       </div>

@@ -32,6 +32,29 @@ export function ApiDirectSection() {
   const [shimRunning, setShimRunning] = useState(null);
   const [saving, setSaving] = useState("");
   const [savedHint, setSavedHint] = useState("");
+  // key 连接测试：{ [upstream]: { busy, ok, status, duration_ms, error } }
+  const [keyTests, setKeyTests] = useState({});
+
+  const testKey = useCallback(async (upstreamKey) => {
+    setKeyTests((prev) => ({ ...prev, [upstreamKey]: { busy: true } }));
+    try {
+      const res = await fetch("/functions/tokentracker-api-keys-test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ upstream: upstreamKey }),
+      });
+      const data = await res.json().catch(() => ({ ok: false, error: "响应解析失败" }));
+      setKeyTests((prev) => ({ ...prev, [upstreamKey]: {
+        busy: false,
+        ok: Boolean(data.ok),
+        status: data.status,
+        duration_ms: data.duration_ms,
+        error: data.error || null,
+      }}));
+    } catch (e) {
+      setKeyTests((prev) => ({ ...prev, [upstreamKey]: { busy: false, ok: false, error: String(e?.message || e) } }));
+    }
+  }, []);
 
   const loadAll = useCallback(async () => {
     try {
@@ -137,7 +160,23 @@ export function ApiDirectSection() {
                     value={draft}
                     onChange={(e) => setKeyDrafts((prev) => ({ ...prev, [u.key]: e.target.value }))}
                   />
+                  <button
+                    type="button"
+                    onClick={() => void testKey(u.key)}
+                    disabled={!info?.has_key || keyTests[u.key]?.busy}
+                    title={info?.has_key ? "对上游发一个最小请求，验证 key 是否可用" : "先保存 key 再测试"}
+                    className="shrink-0 inline-flex items-center rounded-lg border border-oai-gray-200 dark:border-oai-gray-800 px-2.5 py-1.5 text-xs font-medium text-oai-gray-600 dark:text-oai-gray-300 hover:bg-oai-gray-100 dark:hover:bg-oai-gray-800 disabled:opacity-40 transition-colors"
+                  >
+                    {keyTests[u.key]?.busy ? "测试中…" : "测试"}
+                  </button>
                 </div>
+                {keyTests[u.key] && !keyTests[u.key].busy ? (
+                  <p className={`mt-1 text-[11px] ${keyTests[u.key].ok ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                    {keyTests[u.key].ok
+                      ? `✓ 连接成功（HTTP ${keyTests[u.key].status}，${keyTests[u.key].duration_ms}ms）`
+                      : `✗ ${keyTests[u.key].error || "连接失败"}`}
+                  </p>
+                ) : null}
                 <p className="mt-1 text-[11px] text-oai-gray-400 dark:text-oai-gray-500">{u.hint} · key 只存本机、只发给对应上游</p>
               </div>
             );
