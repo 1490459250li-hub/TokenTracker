@@ -15821,12 +15821,12 @@ function resolveCraftDefaultModel() {
 
 // Reasonix persists content-free cumulative usage beside each session JSONL.
 // Reading only these telemetry sidecars keeps prompts and tool output private.
-function resolveReasonixHome(env = process.env) {
+function reasonixHomeCandidates(env = process.env) {
   if (env.TOKENTRACKER_REASONIX_HOME) {
-    return expandHomePath(env.TOKENTRACKER_REASONIX_HOME, env);
+    return [expandHomePath(env.TOKENTRACKER_REASONIX_HOME, env)];
   }
   if (env.REASONIX_STATE_HOME) {
-    return expandHomePath(env.REASONIX_STATE_HOME, env);
+    return [expandHomePath(env.REASONIX_STATE_HOME, env)];
   }
   // Windows installs of Git Bash / MSYS / conda export a HOME of their own
   // (often a POSIX-shaped path), so preferring it silently sends the scan to a
@@ -15837,26 +15837,57 @@ function resolveReasonixHome(env = process.env) {
     process.platform === "win32"
       ? env.USERPROFILE || env.HOME || require("node:os").homedir()
       : env.HOME || require("node:os").homedir();
-  return path.join(home, ".reasonix");
+  const candidates = [path.join(home, ".reasonix")];
+  // On Windows the dot-directory is not where the data lives: Reasonix keeps
+  // sessions and memory under %APPDATA%\reasonix (no leading dot) and only the
+  // cache under %LOCALAPPDATA%. Taking USERPROFILE over a shell HOME was not
+  // enough for #641 because ~/.reasonix does not exist on Windows at all, so
+  // the provider read as "not installed" and vanished from status without a
+  // skipped line. The cache root is deliberately left out.
+  if (process.platform === "win32" && env.APPDATA) {
+    candidates.push(path.join(env.APPDATA, "reasonix"));
+  }
+  return candidates;
 }
 
-function collectReasonixTelemetryFiles(dir, files) {
+// The home used for "is Reasonix installed" (src/commands/status.js,
+// src/commands/init.js): the first candidate that exists, else the first, so
+// the caller still has a path to report.
+function resolveReasonixHome(env = process.env) {
+  const candidates = reasonixHomeCandidates(env);
+  return candidates.find((dir) => fssync.existsSync(dir)) || candidates[0];
+}
+
+// Depth bound because the scan starts at the Reasonix root rather than at two
+// known subdirectories; it is a guard against a pathological tree, not a layout
+// assumption. The known layout (projects/<p>/sessions) sits at depth 3.
+const REASONIX_SCAN_MAX_DEPTH = 8;
+
+function collectReasonixTelemetryFiles(dir, files, depth = 0) {
+  if (depth > REASONIX_SCAN_MAX_DEPTH) return;
   if (!fssync.existsSync(dir)) return;
   let entries;
   try { entries = fssync.readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) collectReasonixTelemetryFiles(full, files);
+    if (entry.isDirectory()) collectReasonixTelemetryFiles(full, files, depth + 1);
     else if (entry.isFile() && entry.name.endsWith(".jsonl.telemetry.json")) files.push(full);
   }
 }
 
 function resolveReasonixTelemetryFiles(env = process.env) {
-  const reasonixHome = resolveReasonixHome(env);
+  // Recurse from each root instead of from a hardcoded projects/ and sessions/.
+  // The #641 reporter supplied a screenshot of the data location, not a
+  // directory listing, so the layout under %APPDATA%\reasonix is unconfirmed —
+  // and a renamed subdirectory would otherwise cost another release to notice.
   const files = [];
-  collectReasonixTelemetryFiles(path.join(reasonixHome, "projects"), files);
-  collectReasonixTelemetryFiles(path.join(reasonixHome, "sessions"), files);
-  return files.sort((a, b) => a.localeCompare(b));
+  const seenHomes = new Set();
+  for (const home of reasonixHomeCandidates(env)) {
+    if (seenHomes.has(home)) continue;
+    seenHomes.add(home);
+    collectReasonixTelemetryFiles(home, files);
+  }
+  return Array.from(new Set(files)).sort((a, b) => a.localeCompare(b));
 }
 
 function readReasonixSnapshot(filePath) {
