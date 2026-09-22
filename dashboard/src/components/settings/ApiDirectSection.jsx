@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { SectionCard } from "./Controls.jsx";
+import { getLocalApiAuthHeaders } from "../../lib/local-api-auth.ts";
 
 /**
  * API 直连分区（本 fork 新增）：
- *   - 三个上游的 API Key（写入 shim config.json，保存后热重载 shim）
+ *   - 各上游的 API Key（写入 shim config.json，保存后热重载 shim）
  *   - 模型单价覆盖（USD/百万 token，写入 pricing.json 热生效）
+ *   - key 连接测试（对上游发最小探活请求，走 local-auth 授权）
  * 所有 key 只存本地、只发给对应上游。
  */
 
@@ -39,9 +41,11 @@ export function ApiDirectSection() {
   const testKey = useCallback(async (upstreamKey) => {
     setKeyTests((prev) => ({ ...prev, [upstreamKey]: { busy: true } }));
     try {
+      // 测试端点走 local-auth 授权（与写操作同级），缺失时返回 403 unauthorized
+      const auth = await getLocalApiAuthHeaders();
       const res = await fetch("/functions/tokentracker-api-keys-test", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...auth },
         body: JSON.stringify({ upstream: upstreamKey }),
       });
       const data = await res.json().catch(() => ({ ok: false, error: "响应解析失败" }));
