@@ -11,6 +11,7 @@
 // schema exactly, so the popover renders the cloud payload unchanged.
 
 const { DEFAULT_BASE_URL, DEFAULT_ANON_KEY } = require("./runtime-config");
+const { expandHeatmapCompact } = require("./heatmap-compact");
 
 // usage-* (local CLI) → account-* (cloud) slug map. Only these have a
 // cross-device cloud equivalent; project-usage / usage-limits / category
@@ -27,6 +28,14 @@ const USAGE_TO_ACCOUNT_SLUG = {
 function accountSlugFor(usageSlug) {
   return USAGE_TO_ACCOUNT_SLUG[usageSlug] || null;
 }
+
+// The heatmap renders a 52-week grid out of a handful of active days, so the
+// dense form is mostly zero-filled cells and repeated keys: ~42 KB on the wire
+// for ~12 KB of data, and this proxy accounts for 94% of those reads. Asking
+// for the sparse rows and rebuilding the grid in `expandHeatmapCompact` gives
+// the caller a byte-identical payload. An edge that predates the compact branch
+// ignores the param and answers densely, which that helper passes through.
+const HEATMAP_ACCOUNT_SLUG = "tokentracker-account-heatmap";
 
 // Mirror of dashboard/src/contexts/InsforgeAuthContext.jsx
 // `accessTokenFromRefreshPayload`: the refresh response may put the token at the
@@ -340,6 +349,7 @@ async function fetchAccountFunction({
       if (value != null && value !== "") url.searchParams.set(key, String(value));
     }
   }
+  if (slug === HEATMAP_ACCOUNT_SLUG) url.searchParams.set("format", "compact");
   const headers = { Accept: "application/json", Authorization: `Bearer ${accessToken}` };
   if (anonKey) headers.apikey = anonKey;
 
@@ -361,7 +371,7 @@ async function fetchAccountFunction({
       throw err;
     }
     const data = await res.json();
-    return data;
+    return slug === HEATMAP_ACCOUNT_SLUG ? expandHeatmapCompact(data) : data;
   } finally {
     if (timeoutId) {
       clearTimeout(timeoutId);
@@ -450,6 +460,7 @@ module.exports = {
   AccountAuthError,
   USAGE_TO_ACCOUNT_SLUG,
   PAYLOAD_TTL_MS,
+  HEATMAP_ACCOUNT_SLUG,
   accountSlugFor,
   accessTokenFromRefreshPayload,
   refreshTokenFromRefreshPayload,

@@ -198,6 +198,10 @@ export default async function (req: Request): Promise<Response> {
   const toParam = url.searchParams.get("to") || "";
   const weekStartsOnRaw = (url.searchParams.get("week_starts_on") || "sun").toLowerCase();
   const weekStartsOn = weekStartsOnRaw === "mon" ? "mon" : "sun";
+  // Opt-in sparse wire format (src/lib/heatmap-compact.js rebuilds the grid).
+  // A caller that does not ask for it gets the dense payload byte for byte, so
+  // every already-shipped client keeps working untouched.
+  const wantsCompact = url.searchParams.get("format") === "compact";
 
   const baseUrl = Deno.env.get("INSFORGE_BASE_URL")!;
   const incomingApiKey =
@@ -286,6 +290,53 @@ export default async function (req: Request): Promise<Response> {
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
 
+  // Both wire formats are derived from `cells` below this line, so the scalars
+  // cannot drift apart: same grid, same clamp, same coercions.
+  const activeDays = cells.filter((c) => c.billable_total_tokens > 0).length;
+
+  if (wantsCompact) {
+    // Two things are paid for repeatedly in the dense payload, and neither is
+    // data. The grid: 52 weeks is 364 five-key objects whose
+    // billable_total_tokens merely repeats total_tokens and whose level is a
+    // function of max_value. And the model names: a year of daily rows names the
+    // same ~160 models ~1900 times, which measured as 57% of the remaining
+    // bytes. So the rows go out sparse, the names go out once, and the client
+    // rebuilds an identical grid. On 2026-09-21 this endpoint was ~42 KB per
+    // read, 60k reads a day, 31% of the project's entire egress.
+    //
+    // A day appears only when the RPC returned a row for it — `models` is
+    // non-null exactly then (it is {} when that row folded no model), which is
+    // what lets the client tell "no activity" from "activity, no model".
+    const modelNames: string[] = [];
+    const modelIndex = new Map<string, number>();
+    const days = cells
+      .filter((c) => c.models !== null)
+      .map((c) => {
+        const pairs: number[] = [];
+        for (const name of Object.keys(c.models!)) {
+          let idx = modelIndex.get(name);
+          if (idx === undefined) {
+            idx = modelNames.length;
+            modelNames.push(name);
+            modelIndex.set(name, idx);
+          }
+          pairs.push(idx, c.models![name]);
+        }
+        return [c.day, c.total_tokens, pairs];
+      });
+    return json({
+      format: "compact",
+      from,
+      to,
+      week_starts_on: weekStartsOn,
+      active_days: activeDays,
+      streak_days: 0,
+      max_value: maxValue,
+      model_names: modelNames,
+      days,
+    });
+  }
+
   const weeksArr: typeof cells[] = [];
   for (let i = 0; i < cells.length; i += 7) {
     weeksArr.push(cells.slice(i, i + 7));
@@ -295,7 +346,7 @@ export default async function (req: Request): Promise<Response> {
     from,
     to,
     week_starts_on: weekStartsOn,
-    active_days: cells.filter((c) => c.billable_total_tokens > 0).length,
+    active_days: activeDays,
     streak_days: 0,
     weeks: weeksArr,
   });

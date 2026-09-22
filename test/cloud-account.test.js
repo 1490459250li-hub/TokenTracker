@@ -535,3 +535,127 @@ test("mutating a returned payload cannot corrupt the cached copy", async () => {
   assert.equal(counter.n, 1);
   assert.equal(second.data.totals.total_tokens, 7);
 });
+
+// --- heatmap compact wire format ------------------------------------------
+// The heatmap is the one account read whose rendered grid is far larger than
+// the data behind it, so the CLI asks for the sparse form and rebuilds the grid
+// locally. See src/lib/heatmap-compact.js.
+
+test("fetchAccountFunction asks the heatmap endpoint for the compact wire format", async () => {
+  const captured = {};
+  const fetchImpl = async (urlStr) => {
+    captured.urlStr = urlStr;
+    return jsonResponse({ weeks: [] });
+  };
+  await fetchAccountFunction({
+    baseUrl: "https://cloud.example",
+    accessToken: "jwt",
+    slug: "tokentracker-account-heatmap",
+    searchParams: new URLSearchParams("weeks=52"),
+    fetchImpl,
+  });
+  assert.equal(new URL(captured.urlStr).searchParams.get("format"), "compact");
+});
+
+test("fetchAccountFunction leaves the other account endpoints on their current format", async () => {
+  for (const slug of [
+    "tokentracker-account-summary",
+    "tokentracker-account-daily",
+    "tokentracker-account-model-breakdown",
+  ]) {
+    let urlStr = "";
+    await fetchAccountFunction({
+      baseUrl: "https://cloud.example",
+      accessToken: "jwt",
+      slug,
+      searchParams: new URLSearchParams(),
+      fetchImpl: async (u) => { urlStr = u; return jsonResponse({}); },
+    });
+    assert.equal(new URL(urlStr).searchParams.get("format"), null, `${slug} must not opt in`);
+  }
+});
+
+test("fetchAccountFunction expands a compact heatmap into the rendered schema", async () => {
+  const body = await fetchAccountFunction({
+    baseUrl: "https://cloud.example",
+    accessToken: "jwt",
+    slug: "tokentracker-account-heatmap",
+    searchParams: new URLSearchParams(),
+    fetchImpl: async () => jsonResponse({
+      format: "compact",
+      from: "2026-09-01",
+      to: "2026-09-07",
+      week_starts_on: "sun",
+      active_days: 1,
+      streak_days: 0,
+      max_value: 100,
+      model_names: ["gpt-5.4"],
+      days: [["2026-09-03", 100, [0, 100]]],
+    }),
+  });
+  assert.equal(body.weeks.length, 1);
+  assert.equal(body.weeks[0].length, 7);
+  assert.equal(body.active_days, 1);
+  assert.ok(!("days" in body) && !("format" in body));
+  assert.deepEqual(body.weeks[0][2], {
+    day: "2026-09-03",
+    total_tokens: 100,
+    billable_total_tokens: 100,
+    level: 4,
+    models: { "gpt-5.4": 100 },
+  });
+});
+
+test("a heatmap response from an edge without the compact branch passes straight through", async () => {
+  // New CLI, old edge: the unknown `format` param is ignored server-side and the
+  // dense payload comes back as before. Nothing may be rewritten.
+  const legacy = {
+    from: "2026-09-01",
+    to: "2026-09-07",
+    week_starts_on: "sun",
+    active_days: 0,
+    streak_days: 0,
+    weeks: [[{ day: "2026-09-01", total_tokens: 0, billable_total_tokens: 0, level: 0, models: null }]],
+  };
+  const body = await fetchAccountFunction({
+    baseUrl: "https://cloud.example",
+    accessToken: "jwt",
+    slug: "tokentracker-account-heatmap",
+    searchParams: new URLSearchParams(),
+    fetchImpl: async () => jsonResponse(legacy),
+  });
+  assert.deepEqual(body, legacy);
+});
+
+test("fetchAccountUsage caches the heatmap payload already expanded", async () => {
+  __resetCloudAccountCacheForTests();
+  let heatmapCalls = 0;
+  const fetchImpl = async (urlStr) => {
+    if (urlStr.includes("/api/auth/refresh")) {
+      return jsonResponse({ access_token: makeJwt({ expSeconds: Math.floor(Date.now() / 1000) + 3600 }) });
+    }
+    heatmapCalls += 1;
+    return jsonResponse({
+      format: "compact",
+      from: "2026-09-01",
+      to: "2026-09-07",
+      week_starts_on: "sun",
+      active_days: 1,
+      streak_days: 0,
+      max_value: 100,
+      model_names: [],
+      days: [["2026-09-03", 100, []]],
+    });
+  };
+  const call = () => fetchAccountUsage({
+    usageSlug: "tokentracker-usage-heatmap",
+    searchParams: new URLSearchParams("weeks=52"),
+    refreshToken: "r",
+    fetchImpl,
+  });
+  const first = await call();
+  const second = await call();
+  assert.equal(heatmapCalls, 1, "second read inside the TTL must not hit the cloud");
+  assert.deepEqual(second.data, first.data);
+  assert.equal(second.data.weeks[0].length, 7, "the cached copy is the rendered grid, not the compact rows");
+});
