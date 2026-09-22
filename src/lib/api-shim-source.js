@@ -24,7 +24,15 @@ const path = require("node:path");
 
 const HALF_HOUR_MS = 30 * 60 * 1000;
 const CURSOR_KEY = "apiShimUsage";
-const SUPPORTED_SOURCES = new Set(["deepseek-api", "mimo-api"]);
+// shim 记账来源 → 主页统计管线。sensenova-api / mimo-payg-api 于 2026-09-22
+// 补入（此前白名单只有 deepseek-api/mimo-api，导致日日新与 MiMo 按量调用
+// 经 shim 记账后不进主页 Token 总数）。
+const SUPPORTED_SOURCES = new Set([
+  "deepseek-api",
+  "mimo-api",
+  "mimo-payg-api",
+  "sensenova-api",
+]);
 // Buckets older than this are dropped from the in-memory running state after
 // being queued at least once. New events cannot legally arrive for hours that
 // far in the past (the shim stamps ts at response time), so pruning keeps the
