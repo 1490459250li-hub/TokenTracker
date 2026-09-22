@@ -280,6 +280,14 @@ export function ApiPlanCards({ apiPlans }) {
                 {mimoPlan > 0 ? <span className={`ml-2 pct ${pctColor(mimoPct)}`}>{mimoPct.toFixed(1)}%</span> : null}
               </span>
             </div>
+            {mimo.payg && (mimo.payg.requests_today > 0 || mimo.payg.spend_today_usd > 0) ? (
+              <div className="flex justify-between">
+                <span className="text-oai-gray-500 dark:text-oai-gray-400">按量计费今日（api.xiaomimimo.com）</span>
+                <span className="font-medium">
+                  ${Number(mimo.payg.spend_today_usd || 0).toFixed(4)} · {formatTokens(mimo.payg.tokens_today || 0)} tok
+                </span>
+              </div>
+            ) : null}
             <p className="text-[11px] text-oai-gray-400 dark:text-oai-gray-500 leading-relaxed">
               Credits = token × 模型倍率（默认 1x，可在 budgets.json 的 multipliers 中按模型覆盖，官方：Pro 2x/4x）
             </p>

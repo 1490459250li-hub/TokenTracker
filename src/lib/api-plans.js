@@ -150,6 +150,40 @@ function buildMimoCard(events, budgets, nowMs) {
   const today = new Date(nowMs);
   const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
   const dailyCredits = new Array(daysInMonth).fill(0);
+  // ── 按量计费（mimo-payg-api）：官方单价计花费，不乘 Credits 倍率 ──
+  const payg = {
+    tokens_today: 0,
+    spend_today_usd: 0,
+    requests_today: 0,
+    last_activity_ts: 0,
+  };
+  const dayStart = new Date(nowMs);
+  dayStart.setUTCHours(0, 0, 0, 0);
+  for (const ev of events) {
+    if (ev.source === "mimo-payg-api") {
+      if (ev.ts > payg.last_activity_ts) payg.last_activity_ts = ev.ts;
+      if (ev.ts < dayStart.getTime()) continue;
+      const row = {
+        source: "mimo-payg-api",
+        model: ev.model,
+        hour_start: new Date(ev.ts).toISOString(),
+        input_tokens: Number(ev.input_tokens) || 0,
+        output_tokens: Number(ev.output_tokens) || 0,
+        cached_input_tokens: Number(ev.cached_input_tokens) || 0,
+        cache_creation_input_tokens: Number(ev.cache_creation_input_tokens) || 0,
+        reasoning_output_tokens: Number(ev.reasoning_output_tokens) || 0,
+      };
+      try {
+        payg.spend_today_usd += computeRowCost(row);
+      } catch {
+        /* pricing unavailable */
+      }
+      payg.tokens_today += Number(ev.total_tokens) || 0;
+      payg.requests_today += 1;
+    }
+  }
+  payg.spend_today_usd = Math.round(payg.spend_today_usd * 1e6) / 1e6;
+  payg.configured = payg.requests_today > 0;
   for (const ev of events) {
     if (ev.source !== "mimo-api" || ev.ts < monthStartMs) continue;
     const multiplier = Number(multipliers[ev.model] ?? defaultMultiplier) || defaultMultiplier;
@@ -169,6 +203,8 @@ function buildMimoCard(events, budgets, nowMs) {
     plan_credits: planCredits,
     credits_used: Math.round(creditsUsed),
     daily_credits: dailyCredits.map((v) => Math.round(v)),
+    // 按量计费子块（与套餐 Credits 并存，独立口径）
+    payg,
     credits_remaining: planCredits > 0 ? Math.max(0, planCredits - Math.round(creditsUsed)) : null,
     tokens_this_month: tokensThisMonth,
     by_model: byModel,
@@ -349,9 +385,11 @@ async function buildApiPlansPayload() {
       mimo: {
         ...mimo,
         configured: Boolean(
-          shimConfigured(this_config, "mimo") || budgets.mimo.planCredits > 0,
+          shimConfigured(this_config, "mimo")
+            || shimConfigured(this_config, "mimo-payg")
+            || budgets.mimo.planCredits > 0,
         ),
-        last_activity_ts: lastActivityBySource["mimo-api"] || null,
+        last_activity_ts: lastActivityBySource["mimo-api"] || lastActivityBySource["mimo-payg-api"] || null,
       },
       sensenova: sensenova,
     },

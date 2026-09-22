@@ -3172,7 +3172,7 @@ function createLocalApiHandler({ queuePath }) {
       const configFile = pathMod.join(osMod.homedir(), ".tokentracker", "api-shim", "config.json");
       const body = await readJsonBody(req).catch(() => ({}));
       const upstreamKey = String(body.upstream || "");
-      const ALLOWED = new Set(["deepseek", "mimo", "sensenova"]);
+      const ALLOWED = new Set(["deepseek", "mimo", "mimo-payg", "sensenova"]);
       if (!ALLOWED.has(upstreamKey)) { json(res, { ok: false, error: "unknown upstream" }, 400); return true; }
       try {
         const conf = JSON.parse(fsSync.readFileSync(configFile, "utf8")) || {};
@@ -3181,7 +3181,8 @@ function createLocalApiHandler({ queuePath }) {
         if (!upstream || !apiKey) { json(res, { ok: false, error: "key 未配置" }); return true; }
         const base = String(upstream.base_url || "").replace(/\/+$/, "");
         if (!base) { json(res, { ok: false, error: "base_url 未配置" }); return true; }
-        // 上游各有零成本的探活路径：DeepSeek 余额接口、MiMo/日日新 models 列表
+        // 上游各有零成本的探活路径：DeepSeek 余额接口、MiMo（两套）/日日新 models 列表
+        // 注意：mimo base_url 已含 /v1，直接拼 /models；deepseek 官方域名无 /v1
         const probe = upstreamKey === "deepseek"
           ? { url: "https://api.deepseek.com/user/balance", headers: { Authorization: `Bearer ${apiKey}` }, timeout: 8000 }
           : { url: `${base}/models`, headers: { Authorization: `Bearer ${apiKey}` }, timeout: 8000 };

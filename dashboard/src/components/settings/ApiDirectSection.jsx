@@ -13,7 +13,8 @@ const inputClass =
 
 const UPSTREAMS = [
   { key: "deepseek", label: "DeepSeek", hint: "platform.deepseek.com，sk- 开头", consoleUrl: "https://platform.deepseek.com" },
-  { key: "mimo", label: "Xiaomi MiMo", hint: "platform.xiaomimimo.com 控制台", consoleUrl: "https://platform.xiaomimimo.com" },
+  { key: "mimo", label: "Xiaomi MiMo · Token Plan 套餐", hint: "Token Plan 专属 key（token-plan 页面获取，与按量 key 不通用），客户端 base_url 指向 http://127.0.0.1:17444/mimo", consoleUrl: "https://platform.xiaomimimo.com" },
+  { key: "mimo-payg", label: "Xiaomi MiMo · 按量计费", hint: "开放平台普通 API Key（api.xiaomimimo.com，按 token 计费），客户端 base_url 指向 http://127.0.0.1:17444/mimo-payg", consoleUrl: "https://platform.xiaomimimo.com" },
   { key: "sensenova", label: "商汤日日新", hint: "platform.sensenova.cn/console/keys，sk- 开头", consoleUrl: "https://platform.sensenova.cn/console/keys" },
 ];
 

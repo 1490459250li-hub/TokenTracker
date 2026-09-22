@@ -13,11 +13,18 @@
       "label": "DeepSeek API"
     },
     "mimo": {
-      "_note": "调用方式：base_url 设为 http://127.0.0.1:17444/mimo/v1 。MiMo 平台 OpenAI 兼容端点参考 codex-mimo-shim 的默认配置",
+      "_note": "Token Plan 套餐上游：调用方式 base_url 设为 http://127.0.0.1:17444/mimo/v1 。需填 Token Plan 专属 key（token-plan-cn 域名专用，与开放平台按量 key 不通用）",
       "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
-      "api_key": "在此填入你的-MIMO-KEY",
+      "api_key": "在此填入你的-MIMO-TOKEN-PLAN-KEY",
       "inject_include_usage": true,
-      "label": "Xiaomi MiMo API"
+      "label": "Xiaomi MiMo Token Plan"
+    },
+    "mimo-payg": {
+      "_note": "开放平台按量计费上游：调用方式 base_url 设为 http://127.0.0.1:17444/mimo-payg/v1 。使用开放平台普通 API Key（api.xiaomimimo.com 域名，按 token 计费）",
+      "base_url": "https://api.xiaomimimo.com/v1",
+      "api_key": "在此填入你的-MIMO-按量-KEY",
+      "inject_include_usage": true,
+      "label": "Xiaomi MiMo 按量计费"
     },
     "sensenova": {
       "_note": "调用方式：base_url 设为 http://127.0.0.1:17444/sensenova/v1 。日日新 OpenAI 兼容网关（platform.sensenova.cn/console/keys 申请 key，sk- 开头）",

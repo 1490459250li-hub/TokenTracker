@@ -317,6 +317,14 @@ function createServer(config, log, reloadConfig) {
     }
   }
   rebuildPrefixes();
+  function reloadUpstreams() {
+    return reloadConfig().then((fresh) => {
+      // Object.assign 只更新 config 对象本身；新增/删除上游后必须重建
+      // 前缀路由表，否则热重载后新前缀 404（曾导致 mimo-payg 不识别）。
+      rebuildPrefixes();
+      return fresh;
+    });
+  }
     return http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
@@ -349,7 +357,7 @@ function createServer(config, log, reloadConfig) {
       req.on("data", (c) => (body += c));
       req.on("end", async () => {
         try {
-          const fresh = await reloadConfig();
+          const fresh = await reloadUpstreams();
           res.writeHead(200, { "content-type": "application/json", ...CORS_HEADERS });
           res.end(JSON.stringify({
             ok: true,
