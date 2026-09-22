@@ -138,6 +138,7 @@ const {
 const {
   parseApiShimUsageIncremental,
 } = require("../lib/api-shim-source");
+const { parseRaccoonUsageIncremental } = require("../lib/raccoon-source");
 const { computeClaudeGroundTruthBuckets } = require("../lib/claude-categorizer");
 const { createProgress, renderBar, formatNumber, formatBytes } = require("../lib/progress");
 const {
@@ -315,6 +316,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "kimi-code",
   "lmstudio",
   "mimo",
+  "mimo-payg",
   "omo",
   "omp",
   "opencode",
@@ -322,6 +324,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "pi",
   "qoder",
   "qoder-cn",
+  "raccoon-api",
   "reasonix",
   "roocode",
   "trae-cn",
@@ -1648,6 +1651,17 @@ async function cmdSync(argv, context = {}) {
         apiShimResult = await parseApiShimUsageIncremental({ cursors, queuePath });
       } catch (err) {
         warnProviderParseFailure("API shim", err, opts);
+      }
+    }
+
+    // ── Raccoon Office (商汤小浣熊) — local SQLite turn usage (本 fork 新增) ──
+    // local-chat.sqlite3 落盘的 turn 级 token_usage，只读副本方式增量读取。
+    let raccoonResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    if (sourceAllowed("raccoon-api")) {
+      try {
+        raccoonResult = await parseRaccoonUsageIncremental({ cursors, queuePath });
+      } catch (err) {
+        warnProviderParseFailure("Raccoon Office", err, opts);
       }
     }
 

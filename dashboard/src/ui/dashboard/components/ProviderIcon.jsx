@@ -425,6 +425,8 @@ const PROVIDER_LOGO_MAP = {
   // native source and the api-shim direct-connect source.
   SENSENOVA: "/brand-logos/sensenova.svg",
   "SENSENOVA-API": "/brand-logos/sensenova.svg",
+  // 商汤小浣熊桌面客户端（office-raccoon）——商汤系产品，复用日日新品牌图标
+  "RACCOON-API": "/brand-logos/sensenova.svg",
   // oh-my-pi: multi-color brand mark (pi letterform + plugin connector). pi
   // itself publishes a white-only mark (pi.dev/logo.svg), so it gets the same
   // <img> luminance treatment as AnythingLLM in PROVIDER_LOGO_CLASS_MAP.
