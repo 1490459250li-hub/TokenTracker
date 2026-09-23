@@ -18,6 +18,7 @@ const {
   updateJsonLocked,
 } = require("../lib/fs");
 const { physicalJsonlRecords } = require("../lib/jsonl-lines");
+const { countRecordOnlyFiles, formatRecordOnlyWarning } = require("../lib/codex-usage-record");
 const {
   listRolloutFiles,
   listRolloutFilesDeep,
@@ -3305,6 +3306,7 @@ async function cmdSync(argv, context = {}) {
     }
 
     if (!opts.auto) {
+      const codexRecordOnlyWarning = formatRecordOnlyWarning(countRecordOnlyFiles(cursors));
       process.stdout.write(
         [
           "Sync finished:",
@@ -3316,6 +3318,7 @@ async function cmdSync(argv, context = {}) {
           runtime.deviceToken && pendingBytes > 0 && !opts.drain
             ? `- Remaining: ${formatBytes(pendingBytes)} pending (run sync again, or use --drain)`
             : null,
+          codexRecordOnlyWarning ? `- Warning: ${codexRecordOnlyWarning}` : null,
           "",
         ]
           .filter(Boolean)

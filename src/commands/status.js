@@ -14,6 +14,7 @@ const {
   buildAcodeNotifyCmd,
   isManagedNotifyCmd,
 } = require("../lib/codex-config");
+const { countRecordOnlyFiles, formatRecordOnlyWarning } = require("../lib/codex-usage-record");
 const {
   isClaudeHookConfigured,
   areClaudeUsageHooksConfigured,
@@ -226,6 +227,7 @@ async function cmdStatus(argv = []) {
 
   const config = await readJson(configPath);
   const { cursors } = await readCursorStateSummary({ trackerDir, cursorsPath });
+  const codexRecordOnlyWarning = formatRecordOnlyWarning(countRecordOnlyFiles(cursors));
   const queueState = (await readJson(queueStatePath)) || { offset: 0 };
   const uploadThrottle = normalizeUploadState(
     await readJson(uploadThrottlePath),
@@ -1233,6 +1235,7 @@ async function cmdStatus(argv = []) {
       codexInstalledStatus
         ? `- Codex CLI: sessions found (${codexActive.join(" | ")})`
         : null,
+      codexRecordOnlyWarning ? `- ⚠ ${codexRecordOnlyWarning}` : null,
       acodeInstalled
         ? `- AStudio: sessions found (${acodeActive.join(" | ")})`
         : null,

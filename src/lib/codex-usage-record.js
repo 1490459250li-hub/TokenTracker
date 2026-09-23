@@ -20,8 +20,16 @@
 // rollout repeats them, both with the same id. A record without one is never
 // counted.
 //
+// A file whose records are never matched by a token_count is not counted from
+// its records. It is flagged `recordOnly` instead, and sync surfaces a
+// warning. The proof is the same ordering Codex keeps for every response: its
+// token_count is written after its record and before the next record or the
+// turn end. So a record followed by another record or a turn end with no
+// token_count in between flags the file; a sync that stops between a record
+// and its token_count does not.
+//
 // payload.usage is the per-response delta; turn_token_usage and
-// thread_token_usage are cumulative and are never read. The state below is
+// thread_token_usage are cumulative and are never read. All state below is
 // persisted in the sync cursor and the session parser resume state, so the
 // record, the `compacted` line and the token_count may land in different
 // reads.
@@ -71,6 +79,12 @@ function createCompactionResponseIds(cursors) {
   };
 }
 
+function isCodexTurnEndEvent(obj) {
+  if (obj?.type !== "event_msg") return false;
+  const type = obj.payload?.type;
+  return type === "task_complete" || type === "turn_aborted";
+}
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -79,6 +93,8 @@ function createUsageRecordState(snapshot) {
   const compaction = snapshot?.compaction;
   return {
     sawTokenCount: Boolean(snapshot?.sawTokenCount),
+    unmatchedRecord: Boolean(snapshot?.unmatchedRecord),
+    recordOnly: Boolean(snapshot?.recordOnly),
     compaction: isPlainObject(compaction) && isPlainObject(compaction.candidate)
       ? { candidate: compaction.candidate, compacted: Boolean(compaction.compacted) }
       : null,
@@ -88,14 +104,26 @@ function createUsageRecordState(snapshot) {
 // Called for every token_count carrying an info object.
 function noteTokenCount(state) {
   state.sawTokenCount = true;
+  state.unmatchedRecord = false;
+  state.recordOnly = false;
 }
 
 // Called for every record. `candidate` is what the caller would count if the
 // record turns out to be a compaction call (null when it cannot be counted).
 function noteUsageRecord(state, candidate) {
-  state.compaction = state.sawTokenCount && candidate
-    ? { candidate, compacted: false }
-    : null;
+  if (state.sawTokenCount) {
+    state.compaction = candidate ? { candidate, compacted: false } : null;
+    return;
+  }
+  if (state.unmatchedRecord) state.recordOnly = true;
+  state.unmatchedRecord = true;
+}
+
+// Turn end: a record still waiting for its token_count will not get one.
+function noteTurnEnd(state) {
+  if (state.sawTokenCount) return;
+  if (state.unmatchedRecord) state.recordOnly = true;
+  state.unmatchedRecord = false;
 }
 
 // True while the line right after a record decides whether it was a
@@ -123,21 +151,44 @@ function takeCompactionOnTokenCount(state, previousTotal, totalUsage) {
   return compaction.candidate;
 }
 
+function isRecordOnly(state) {
+  return Boolean(state?.recordOnly && !state.sawTokenCount);
+}
+
 function snapshotUsageRecordState(state) {
-  if (!state || !state.sawTokenCount) return null;
-  const out = { sawTokenCount: true };
+  if (!state || (!state.sawTokenCount && !state.unmatchedRecord && !state.recordOnly)) return null;
+  const out = { sawTokenCount: state.sawTokenCount };
+  if (state.unmatchedRecord) out.unmatchedRecord = true;
+  if (state.recordOnly) out.recordOnly = true;
   if (state.compaction) out.compaction = state.compaction;
   return out;
 }
 
+// Sync keeps the flagged rollouts in core cursor state:
+// cursors.codexUsageRecordOnlyFiles = { [rolloutPath]: true }.
+function countRecordOnlyFiles(cursors) {
+  const flagged = cursors?.codexUsageRecordOnlyFiles;
+  return isPlainObject(flagged) ? Object.keys(flagged).length : 0;
+}
+
+function formatRecordOnlyWarning(count) {
+  if (!count) return null;
+  return `${count} Codex session(s) report usage only via token_usage_record; not counted yet (see #652)`;
+}
+
 module.exports = {
   MAX_COMPACTION_RESPONSE_IDS,
-  awaitsCompactedLine,
   createCompactionResponseIds,
+  countRecordOnlyFiles,
+  formatRecordOnlyWarning,
+  awaitsCompactedLine,
   createUsageRecordState,
   extractTokenUsageRecord,
+  isCodexTurnEndEvent,
+  isRecordOnly,
   noteLineAfterUsageRecord,
   noteTokenCount,
+  noteTurnEnd,
   noteUsageRecord,
   snapshotUsageRecordState,
   takeCompactionOnTokenCount,

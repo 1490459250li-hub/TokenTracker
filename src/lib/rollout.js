@@ -31,8 +31,11 @@ const {
   createCompactionResponseIds,
   createUsageRecordState,
   extractTokenUsageRecord,
+  isCodexTurnEndEvent,
+  isRecordOnly,
   noteLineAfterUsageRecord,
   noteTokenCount,
+  noteTurnEnd,
   noteUsageRecord,
   snapshotUsageRecordState,
   takeCompactionOnTokenCount,
@@ -628,6 +631,16 @@ async function parseRolloutIncremental({
       ? usageRecordState
       : result.usageRecordState;
     if (nextUsageRecordState) nextCursor.codexUsageRecord = nextUsageRecordState;
+    // Files whose usage only exists as token_usage_record rows are not
+    // counted (issue #652); keep them in core cursor state so sync and status
+    // can warn without loading per-file cursor shards.
+    if (fileSource === DEFAULT_SOURCE) {
+      if (isRecordOnly(nextUsageRecordState)) {
+        (cursors.codexUsageRecordOnlyFiles ||= {})[key] = true;
+      } else if (cursors.codexUsageRecordOnlyFiles?.[key]) {
+        delete cursors.codexUsageRecordOnlyFiles[key];
+      }
+    }
     if (codexProjectFastPath) {
       nextCursor.projectOffset = result.endOffset;
       nextCursor.projectFileContext = buildProjectFileContext(
@@ -671,6 +684,11 @@ async function parseRolloutIncremental({
     cursors.projectHourly = projectState;
   }
   compactionResponseIds.persist();
+  // A deleted rollout no longer needs a warning. The map is empty unless a
+  // record-only writer exists, so this is normally free.
+  for (const flaggedPath of Object.keys(cursors.codexUsageRecordOnlyFiles || {})) {
+    if (!fssync.existsSync(flaggedPath)) delete cursors.codexUsageRecordOnlyFiles[flaggedPath];
+  }
 
   return { filesProcessed, eventsAggregated, bucketsQueued, projectBucketsQueued };
 }
@@ -2268,7 +2286,11 @@ async function parseRolloutFile({
       !maybeTokenCount && !maybeModelReroute && !maybeTurnContext &&
       line.includes(CODEX_SERVICE_TIER_MARKER);
     const maybeUsageRecord =
-      !maybeTokenCount && Boolean(usageRecordState) && line.includes('"token_usage_record"');
+      !maybeTokenCount &&
+      Boolean(usageRecordState) &&
+      (line.includes('"token_usage_record"') ||
+        (usageRecordState.unmatchedRecord &&
+          (line.includes('"task_complete"') || line.includes('"turn_aborted"'))));
     if (
       !maybeTokenCount &&
       !maybeTurnContext &&
@@ -2341,6 +2363,10 @@ async function parseRolloutFile({
       const usageRecord = extractTokenUsageRecord(obj);
       if (usageRecord) {
         noteUsageRecord(usageRecordState, buildCompactionEvent(usageRecord));
+        continue;
+      }
+      if (isCodexTurnEndEvent(obj)) {
+        noteTurnEnd(usageRecordState);
         continue;
       }
     }

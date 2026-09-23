@@ -392,3 +392,63 @@ test("session parser: a compaction repeated across merged files counts once, spl
     assert.equal((await parserTotals(fork, [cut, fork.length])).tokens, whole, `cut at ${cut}`);
   }
 });
+
+// Files whose usage only exists as token_usage_record rows are not counted
+// from the records; sync flags them so status and sync can warn.
+const { countRecordOnlyFiles, formatRecordOnlyWarning } = require("../src/lib/codex-usage-record");
+
+const RECORD_ONLY = [
+  meta(),
+  turnContext("2026-09-20T04:00:01.000Z"),
+  tur("2026-09-20T04:00:10.000Z", R1),
+  tur("2026-09-20T04:00:20.000Z", R2),
+  taskComplete("2026-09-20T04:00:22.000Z"),
+];
+
+test("record-only file: nothing is counted and the file is flagged", async () => {
+  await withTmp(async (ctx) => {
+    await fs.writeFile(ctx.rolloutPath, RECORD_ONLY.join("\n") + "\n");
+    await ctx.sync();
+    assert.equal((await queueTotals(ctx.queuePath)).total_tokens, 0);
+    assert.deepEqual(ctx.cursors.codexUsageRecordOnlyFiles, { [ctx.rolloutPath]: true });
+    assert.equal(countRecordOnlyFiles(ctx.cursors), 1);
+    assert.match(formatRecordOnlyWarning(1), /^1 Codex session\(s\) report usage only via token_usage_record/);
+    assert.equal((await ctx.sync()).eventsAggregated, 0);
+    assert.equal(countRecordOnlyFiles(ctx.cursors), 1);
+  });
+  assert.equal((await parserTotals(RECORD_ONLY)).tokens, 0);
+});
+
+test("record-only flag: set across syncs, never for a record awaiting its token_count", async () => {
+  await withTmp(async (ctx) => {
+    // A sync between a record and its token_count proves nothing yet.
+    await fs.writeFile(ctx.rolloutPath, RECORD_ONLY.slice(0, 3).join("\n") + "\n");
+    await ctx.sync();
+    assert.equal(countRecordOnlyFiles(ctx.cursors), 0);
+    await fs.appendFile(ctx.rolloutPath, RECORD_ONLY[3] + "\n");
+    await ctx.sync();
+    assert.equal(countRecordOnlyFiles(ctx.cursors), 1);
+    // A token_count showing up later makes it a normal file again.
+    await fs.appendFile(ctx.rolloutPath, tc("2026-09-20T04:00:31.000Z", R2, add(C1, R2)) + "\n");
+    await ctx.sync();
+    assert.equal(countRecordOnlyFiles(ctx.cursors), 0);
+    assert.ok((await queueTotals(ctx.queuePath)).total_tokens > 0);
+  });
+});
+
+test("file with both events is not flagged; a deleted flagged file stops warning", async () => {
+  await withTmp(async (ctx) => {
+    for (const l of compactionLines({ advances: false })) {
+      await fs.appendFile(ctx.rolloutPath, l + "\n");
+      await ctx.sync();
+      assert.equal(countRecordOnlyFiles(ctx.cursors), 0);
+    }
+    await fs.writeFile(ctx.forkPath, RECORD_ONLY.join("\n") + "\n");
+    await ctx.sync([ctx.rolloutPath, ctx.forkPath]);
+    assert.equal(countRecordOnlyFiles(ctx.cursors), 1);
+    await fs.rm(ctx.forkPath);
+    await ctx.sync([ctx.rolloutPath]);
+    assert.equal(countRecordOnlyFiles(ctx.cursors), 0);
+  });
+  assert.equal(formatRecordOnlyWarning(0), null);
+});
