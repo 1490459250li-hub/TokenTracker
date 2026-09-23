@@ -8,6 +8,8 @@ const { cmdServe } = require("./commands/serve");
 const { cmdDeviceLogin } = require("./commands/device-login");
 const { cmdWrapped } = require("./commands/wrapped");
 const { cmdSessions } = require("./commands/sessions");
+const { cmdOptimize } = require("./commands/optimize");
+const { cmdAct } = require("./commands/act");
 
 async function run(argv) {
   const [command, ...rest] = argv;
@@ -60,6 +62,12 @@ async function run(argv) {
     case "sessions":
       await cmdSessions(rest);
       return;
+    case "optimize":
+      await cmdOptimize(rest);
+      return;
+    case "act":
+      await cmdAct(rest);
+      return;
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -84,6 +92,8 @@ function printHelp() {
       "  npx tokentracker [--debug] device-login [--json] [--base-url <url>]",
       "  npx tokentracker [--debug] wrapped [--year 2026] [--json]",
       "  npx tokentracker sessions [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--format json|csv] [--out file] [--refresh] [--no-git]",
+      "  npx tokentracker optimize [--json] [--since N] [--top N] [--home DIR]",
+      "  npx tokentracker act [apply [--yes] [--id PREFIX]] | [undo] | [report] [--json]",
       "",
       "Notes:",
       "  - init: consent first, local setup next, browser sign-in last.",
@@ -99,6 +109,7 @@ function printHelp() {
       "  - --debug shows original backend errors.",
       "  - device-login pairs a headless CLI / SSH session with a browser sign-in (15-min code).",
       "  - sessions exports metadata-only Claude/Codex efficiency analytics; no prompt or response text is retained.",
+      "  - optimize scans the local usage queue for cross-model waste and prices each finding; act apply/undo/report make the fixes reversible and re-measured after 3 days.",
       "",
     ].join("\n"),
   );
