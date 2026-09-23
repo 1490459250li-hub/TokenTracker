@@ -12,6 +12,7 @@ const { cmdOptimize } = require("./commands/optimize");
 const { cmdAct } = require("./commands/act");
 const { cmdGuard } = require("./commands/guard");
 const { cmdGuardHook } = require("./commands/guard-hook");
+const { cmdCompare } = require("./commands/compare");
 
 async function run(argv) {
   const [command, ...rest] = argv;
@@ -76,6 +77,9 @@ async function run(argv) {
     case "guard-hook":
       await cmdGuardHook();
       return;
+    case "compare":
+      await cmdCompare(rest);
+      return;
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -103,6 +107,7 @@ function printHelp() {
       "  npx tokentracker optimize [--json] [--since N] [--top N] [--home DIR]",
       "  npx tokentracker act [apply [--yes] [--id PREFIX]] | [undo] | [report] [--json]",
       "  npx tokentracker guard [on [--soft N] [--hard N] [--checkpoint N] | off | status | limit [...] | allow] [--json]",
+      "  npx tokentracker compare [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--since N] [--min-edits N] [--top N] [--json] [--home DIR]",
       "",
       "Notes:",
       "  - init: consent first, local setup next, browser sign-in last.",
@@ -120,6 +125,7 @@ function printHelp() {
       "  - sessions exports metadata-only Claude/Codex efficiency analytics; no prompt or response text is retained.",
       "  - optimize scans the local usage queue for cross-model waste and prices each finding; act apply/undo/report make the fixes reversible and re-measured after 3 days.",
       "  - guard is opt-in: installs PreToolUse/Stop/SessionStart hooks into ~/.claude/settings.json (backed up) that warn/stop on budget and nudge on a no-output session.",
+      "  - compare ranks models by one-shot/retry/cost-per-edit/cache-hit and suggests which to use; yield reports per-session ROI from git attribution; overview emits a pasteable period report.",
       "",
     ].join("\n"),
   );
