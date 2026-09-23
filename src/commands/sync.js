@@ -4812,8 +4812,10 @@ async function migrateRolloutCumulativeDeltaBuckets({ cursors, queuePath, rollou
   // The migration clears Codex buckets and reparses the discovered corpus from
   // byte zero. Persisted event keys belong to the cleared buckets, so retaining
   // them can suppress the rebuild when a moved session still has an old path
-  // cursor. Rebuild the hash inventory together with the buckets.
+  // cursor. Rebuild the hash inventory together with the buckets. Counted
+  // compaction ids (#652) belong to the cleared buckets the same way.
   cursors.codexHashes = [];
+  cursors.codexCompactionResponseIds = [];
 
   const buckets = cursors.hourly?.buckets;
   const retractions = [];
@@ -5365,6 +5367,9 @@ async function repairCodexRescanInflation({
       buckets: tmpCursors.hourly.buckets || {},
       groupQueued: tmpCursors.hourly.groupQueued || {},
       codexHashes: Array.isArray(tmpCursors.codexHashes) ? tmpCursors.codexHashes : [],
+      codexCompactionResponseIds: Array.isArray(tmpCursors.codexCompactionResponseIds)
+        ? tmpCursors.codexCompactionResponseIds
+        : [],
       files: tmpCursors.files || {},
       queueRows: tmpRaw.split("\n").filter((l) => l.trim()),
       projectHourly: tmpCursors.projectHourly || null,
@@ -5519,6 +5524,7 @@ async function repairCodexRescanInflation({
     cursors.files[fp] = v;
   }
   cursors.codexHashes = rebuilt.codexHashes;
+  cursors.codexCompactionResponseIds = rebuilt.codexCompactionResponseIds;
 
   // 3. Project usage mirrors the main Codex repair: drop inflated Codex project
   //    rows, append the rebuilt rows, and swap only Codex project buckets. Project

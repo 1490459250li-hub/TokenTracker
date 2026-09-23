@@ -27,6 +27,17 @@ const {
   isPriorityServiceTier,
 } = require("./codex-service-tier");
 const {
+  awaitsCompactedLine,
+  createCompactionResponseIds,
+  createUsageRecordState,
+  extractTokenUsageRecord,
+  noteLineAfterUsageRecord,
+  noteTokenCount,
+  noteUsageRecord,
+  snapshotUsageRecordState,
+  takeCompactionOnTokenCount,
+} = require("./codex-usage-record");
+const {
   DEVIN_TABLE_PROBE_SQL,
   devinUsageSql,
   buildDevinUsageEvents,
@@ -258,6 +269,10 @@ async function parseRolloutIncremental({
   if (!cursors.files || typeof cursors.files !== "object") {
     cursors.files = {};
   }
+  // Counted Codex compaction calls by response_id (issue #652). Core cursor
+  // state, so a fork replay or a copied rollout under any path or day shard
+  // sees every compaction counted before.
+  const compactionResponseIds = createCompactionResponseIds(cursors);
 
   // Persisted set of seen Codex event keys (sessionUUID:eventTimestamp). Mirrors
   // the claudeHashes pattern: it makes an inode-changing re-scan idempotent so an
@@ -480,6 +495,12 @@ async function parseRolloutIncremental({
     const modelAttributionState = sameInode && !truncated
       ? prev.modelAttributionState || null
       : null;
+    // Only valid for the bytes before the resume offset; a rescan from 0
+    // rebuilds it. A cursor from before #652 with a lastTotal has seen a
+    // token_count already.
+    const usageRecordState = startOffset > 0
+      ? prev?.codexUsageRecord || (prev?.lastTotal ? { sawTokenCount: true } : null)
+      : null;
 
     const codexProjectFastPath =
       projectEnabled && (fileSource === DEFAULT_SOURCE || fileSource === "acode");
@@ -575,6 +596,8 @@ async function parseRolloutIncremental({
           lastModel,
           lastServiceTier,
           modelAttributionState,
+          usageRecordState,
+          compactionResponseIds,
           hourlyState,
           touchedBuckets,
           source: fileSource,
@@ -601,6 +624,10 @@ async function parseRolloutIncremental({
       modelAttributionState: result.modelAttributionState,
       updatedAt: new Date().toISOString(),
     };
+    const nextUsageRecordState = projectContextOnlyScan
+      ? usageRecordState
+      : result.usageRecordState;
+    if (nextUsageRecordState) nextCursor.codexUsageRecord = nextUsageRecordState;
     if (codexProjectFastPath) {
       nextCursor.projectOffset = result.endOffset;
       nextCursor.projectFileContext = buildProjectFileContext(
@@ -643,6 +670,7 @@ async function parseRolloutIncremental({
     projectState.updatedAt = new Date().toISOString();
     cursors.projectHourly = projectState;
   }
+  compactionResponseIds.persist();
 
   return { filesProcessed, eventsAggregated, bucketsQueued, projectBucketsQueued };
 }
@@ -2071,6 +2099,8 @@ async function parseRolloutFile({
   lastModel,
   lastServiceTier,
   modelAttributionState: previousModelAttributionState,
+  usageRecordState: previousUsageRecordState = null,
+  compactionResponseIds = null,
   hourlyState,
   touchedBuckets,
   source,
@@ -2098,6 +2128,7 @@ async function parseRolloutFile({
       lastModel,
       lastServiceTier: typeof lastServiceTier === "string" ? lastServiceTier : null,
       modelAttributionState: previousModelAttributionState,
+      usageRecordState: previousUsageRecordState,
       eventsAggregated: 0,
       projectFileContexts,
     };
@@ -2142,6 +2173,54 @@ async function parseRolloutFile({
   let eventsAggregated = 0;
   let scannedEndOffset = startOffset;
   let committedEndOffset = startOffset;
+  // Compaction records (issue #652, rules in codex-usage-record.js). Codex only.
+  const usageRecordState = source === DEFAULT_SOURCE && compactionResponseIds
+    ? createUsageRecordState(previousUsageRecordState)
+    : null;
+
+  // What a record adds if it turns out to be a compaction call: model, tier
+  // and project are those in effect when the record was written. A record
+  // without a response_id cannot be deduplicated and is never counted.
+  function buildCompactionEvent(record) {
+    if (!record.responseId) return null;
+    const delta = normalizeUsage(record.usage);
+    if (isAllZeroUsage(delta)) return null;
+    delta.conversation_count = 1;
+    const bucketStart = toUtcHalfHourStart(record.timestamp);
+    if (!bucketStart) return null;
+    return {
+      responseId: record.responseId,
+      bucketStart,
+      model,
+      serviceTier,
+      projectKey: currentProjectKey,
+      projectRef: currentProjectRef,
+      delta,
+    };
+  }
+
+  // Counted once per response_id across every rollout: a fork replays its
+  // parent's records and a copied rollout repeats them, both with the same id.
+  function addCompactionEvent(event) {
+    if (compactionResponseIds.has(event.responseId)) return;
+    compactionResponseIds.add(event.responseId);
+    const bucket = getHourlyBucket(hourlyState, source, event.model, event.bucketStart);
+    addTotals(bucket.totals, event.delta);
+    if (isPriorityServiceTier(event.serviceTier)) addPriorityUsage(bucket.totals, event.delta);
+    touchedBuckets.add(bucketKey(source, event.model, event.bucketStart));
+    if (event.projectKey && projectState && projectTouchedBuckets) {
+      const projectBucket = getProjectBucket(
+        projectState,
+        event.projectKey,
+        source,
+        event.bucketStart,
+        event.projectRef,
+      );
+      addTotals(projectBucket.totals, event.delta);
+      projectTouchedBuckets.add(projectBucketKey(event.projectKey, source, event.bucketStart));
+    }
+    eventsAggregated += 1;
+  }
 
   const invalidUtf8 = invalidRecordPolicy === "throw" ? "throw" : "record";
   for await (const record of physicalJsonlRecords(stream, { invalidUtf8 })) {
@@ -2154,6 +2233,26 @@ async function parseRolloutFile({
 
     const { line } = record;
     if (!line) continue;
+    // Only a `compacted` line directly after a record keeps it as a
+    // compaction candidate. A line that is not complete yet decides nothing:
+    // the read stops before it and the next sync sees it whole.
+    if (awaitsCompactedLine(usageRecordState)) {
+      let next;
+      if (!record.terminated || line.includes('"compacted"')) {
+        try {
+          next = JSON.parse(line);
+        } catch {
+          next = undefined;
+        }
+      }
+      if (next !== undefined || record.terminated) {
+        noteLineAfterUsageRecord(usageRecordState, next?.type === "compacted");
+      }
+      if (next?.type === "compacted") {
+        committedEndOffset = scannedEndOffset;
+        continue;
+      }
+    }
     const maybeTokenCount = line.includes('"token_count"');
     const maybeModelReroute =
       !maybeTokenCount &&
@@ -2168,7 +2267,15 @@ async function parseRolloutFile({
     const maybeServiceTier =
       !maybeTokenCount && !maybeModelReroute && !maybeTurnContext &&
       line.includes(CODEX_SERVICE_TIER_MARKER);
-    if (!maybeTokenCount && !maybeTurnContext && !maybeModelReroute && !maybeServiceTier) {
+    const maybeUsageRecord =
+      !maybeTokenCount && Boolean(usageRecordState) && line.includes('"token_usage_record"');
+    if (
+      !maybeTokenCount &&
+      !maybeTurnContext &&
+      !maybeModelReroute &&
+      !maybeServiceTier &&
+      !maybeUsageRecord
+    ) {
       if (invalidRecordPolicy === "throw" || !record.terminated) {
         try {
           JSON.parse(line);
@@ -2230,11 +2337,28 @@ async function parseRolloutFile({
       continue;
     }
 
+    if (usageRecordState) {
+      const usageRecord = extractTokenUsageRecord(obj);
+      if (usageRecord) {
+        noteUsageRecord(usageRecordState, buildCompactionEvent(usageRecord));
+        continue;
+      }
+    }
+
     const token = extractTokenCount(obj);
     if (!token) continue;
 
     const info = token.info;
     if (!info || typeof info !== "object") continue;
+    if (usageRecordState) {
+      noteTokenCount(usageRecordState);
+      const compaction = takeCompactionOnTokenCount(
+        usageRecordState,
+        usageDeltaState.lastTotal,
+        info.total_token_usage,
+      );
+      if (compaction) addCompactionEvent(compaction);
+    }
 
     const tokenTimestamp = typeof token.timestamp === "string" ? token.timestamp : null;
     if (!tokenTimestamp) continue;
@@ -2352,6 +2476,9 @@ async function parseRolloutFile({
     lastModel: model,
     lastServiceTier: serviceTier,
     modelAttributionState: snapshotCodexModelAttributionState(modelAttributionState),
+    usageRecordState: usageRecordState
+      ? snapshotUsageRecordState(usageRecordState)
+      : previousUsageRecordState,
     eventsAggregated,
     projectFileContexts,
   };
