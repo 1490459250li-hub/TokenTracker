@@ -14,6 +14,7 @@ const { cmdGuard } = require("./commands/guard");
 const { cmdGuardHook } = require("./commands/guard-hook");
 const { cmdCompare } = require("./commands/compare");
 const { cmdYield } = require("./commands/yield");
+const { cmdOverview } = require("./commands/overview");
 
 async function run(argv) {
   const [command, ...rest] = argv;
@@ -84,6 +85,9 @@ async function run(argv) {
     case "yield":
       await cmdYield(rest);
       return;
+    case "overview":
+      await cmdOverview(rest);
+      return;
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -113,6 +117,7 @@ function printHelp() {
       "  npx tokentracker guard [on [--soft N] [--hard N] [--checkpoint N] | off | status | limit [...] | allow] [--json]",
       "  npx tokentracker compare [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--since N] [--min-edits N] [--top N] [--json] [--home DIR]",
       "  npx tokentracker yield [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--since N] [--min-cost N] [--top N] [--refresh] [--json] [--home DIR]",
+      "  npx tokentracker overview [--period day|week|month] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--with-roi] [--markdown] [--json] [--home DIR]",
       "",
       "Notes:",
       "  - init: consent first, local setup next, browser sign-in last.",
