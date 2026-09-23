@@ -92,6 +92,8 @@ const {
   resolveDroidSessionsDir,
   resolveDshHomes,
   resolveDshSessionFiles,
+  resolveCommandCodeHomes,
+  resolveCommandCodeSessionFiles,
   resolveTraeStoragePath,
   readTraeEntitlementFromStorage,
   resolveGrokBuildSessions,
@@ -727,6 +729,11 @@ async function cmdStatus(argv = []) {
   const dshSessionsDir = dshHomes.map((homeDir) => path.join(homeDir, "sessions")).join(", ");
   const dshSessionFiles = await resolveDshSessionFiles(process.env);
   const dshInstalled = dshSessionFiles.length > 0;
+  const commandCodeProjectsDir = resolveCommandCodeHomes(process.env)
+    .map((homeDir) => path.join(homeDir, "projects"))
+    .join(", ");
+  const commandCodeSessionFiles = await resolveCommandCodeSessionFiles(process.env);
+  const commandCodeInstalled = commandCodeSessionFiles.length > 0;
   const lmstudioHome = resolveLmstudioHome(process.env);
   const lmstudioLogFiles = await resolveLmstudioLogFiles(process.env);
   const lmstudioInstalled = lmstudioLogFiles.length > 0;
@@ -1082,6 +1089,13 @@ async function cmdStatus(argv = []) {
         dsh: dshInstalled
           ? { installed: true, files: dshSessionFiles.length, detail: dshSessionsDir }
           : { installed: false },
+        "command-code": commandCodeInstalled
+          ? {
+              installed: true,
+              files: commandCodeSessionFiles.length,
+              detail: commandCodeProjectsDir,
+            }
+          : { installed: false },
         lmstudio: lmstudioInstalled
           ? {
               installed: true,
@@ -1287,6 +1301,9 @@ async function cmdStatus(argv = []) {
         : null,
       dshInstalled
         ? `- DeepSeek Harness: passive reader (${dshSessionFiles.length} session${dshSessionFiles.length !== 1 ? "s" : ""} in ${dshSessionsDir})`
+        : null,
+      commandCodeInstalled
+        ? `- Command Code: passive reader (${commandCodeSessionFiles.length} session${commandCodeSessionFiles.length !== 1 ? "s" : ""} in ${commandCodeProjectsDir})`
         : null,
       lmstudioInstalled
         ? `- LM Studio: passive reader (${lmstudioLogFiles.length} log${lmstudioLogFiles.length !== 1 ? "s" : ""} in ${path.join(lmstudioHome, "server-logs")})`

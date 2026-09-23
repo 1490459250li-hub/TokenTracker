@@ -134,6 +134,8 @@ const {
   resolveDroidModel,
   resolveDshSessionFiles,
   parseDshIncremental,
+  resolveCommandCodeSessionFiles,
+  parseCommandCodeIncremental,
   parseTraeCnApiIncremental,
   parseTraeIncremental,
   bucketKey,
@@ -287,6 +289,7 @@ const ZCODE_NATIVE_USAGE_REPAIR_KEY = "zcodeNativeUsageRepair_2026_08";
 const ZCODE_INCLUSIVE_TOKEN_REPAIR_KEY = "zcodeInclusiveTokenRepair_2026_09";
 const AUTO_SYNC_SOURCE_ALIASES = new Map([
   ["code", "every-code"],
+  ["commandcode", "command-code"],
   ["deepseek", "dsh"],
   ["everycode", "every-code"],
   ["kilo", "kilo-cli"],
@@ -303,6 +306,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "cline",
   "codebuddy",
   "codex",
+  "command-code",
   "copilot",
   "craft",
   "cursor",
@@ -1678,6 +1682,32 @@ async function cmdSync(argv, context = {}) {
         raccoonResult = await parseRaccoonUsageIncremental({ cursors, queuePath });
       } catch (err) {
         warnProviderParseFailure("Raccoon Office", err, opts);
+      }
+    }
+
+    // ── Command Code (`cmd`) — passive read of ~/.commandcode session logs ──
+    let commandCodeResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    if (sourceAllowed("command-code")) {
+      try {
+        const commandCodeSessionFiles = await resolveCommandCodeSessionFiles(process.env);
+        if (commandCodeSessionFiles.length > 0) {
+          if (progress?.enabled) {
+            progress.start(
+              `Parsing Command Code ${renderBar(0)} 0/${formatNumber(
+                commandCodeSessionFiles.length,
+              )} sessions | buckets 0`,
+            );
+          }
+          commandCodeResult = await parseCommandCodeIncremental({
+            sessionFiles: commandCodeSessionFiles,
+            cursors,
+            queuePath,
+            projectQueuePath,
+            onProgress: makeProviderProgress("Command Code"),
+          });
+        }
+      } catch (err) {
+        warnProviderParseFailure("Command Code", err, opts);
       }
     }
 
@@ -3152,7 +3182,8 @@ async function cmdSync(argv, context = {}) {
       gooseResult.recordsProcessed +
       dshResult.recordsProcessed +
       droidResult.recordsProcessed +
-      apiShimResult.recordsProcessed;
+      apiShimResult.recordsProcessed +
+      commandCodeResult.recordsProcessed;
     const totalBuckets =
       parseResult.bucketsQueued +
       openclawResult.bucketsQueued +
@@ -3196,7 +3227,8 @@ async function cmdSync(argv, context = {}) {
       gooseResult.bucketsQueued +
       dshResult.bucketsQueued +
       droidResult.bucketsQueued +
-      apiShimResult.bucketsQueued;
+      apiShimResult.bucketsQueued +
+      commandCodeResult.bucketsQueued;
     const skipNoOpCursorCommit =
       opts.auto &&
       !isFullSourceScan &&
