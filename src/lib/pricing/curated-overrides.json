@@ -6,6 +6,40 @@
     "iflytek_maas_pricing_note": "iFlytek MaaS inference prices supplied for AStudio on 2026-08-31. AStudio homepage: https://agent.xfyun.cn/. Official pricing source: https://maas.xfyun.cn/modelSquare. Source values are RMB per million tokens, converted at 7.2 RMB/USD, then rounded to two decimal places for billing. Models without a dedicated cache-hit price use the normal input rate; cache writes also use the normal input rate. iFlytek MaaS prices are source-scoped and do not inherit DeepSeek time-of-use discounts."
   },
   "exact": {
+    "qwen3.8-max": {
+      "input": 1.667,
+      "output": 5,
+      "note": "Alibaba Cloud Model Studio official rate, Beijing, verified 2026-09-22: 12 / 36 RMB per MTok in/out, converted at ~7.2 RMB/USD."
+    },
+    "qwen3.8-27b": {
+      "input": 0.4167,
+      "output": 1.6667,
+      "cache_read": 0.0833,
+      "cache_write": 0.5208,
+      "note": "Alibaba Cloud Model Studio official rate, Beijing, verified 2026-09-22: 3 / 12 RMB in/out; implicit cache hit 0.6, explicit cache create 3.75 RMB per MTok, converted at ~7.2 RMB/USD. Exact lookup is case-sensitive, so the WorkBuddy casing is duplicated below."
+    },
+    "Qwen3.8-27B": {
+      "input": 0.4167,
+      "output": 1.6667,
+      "cache_read": 0.0833,
+      "cache_write": 0.5208,
+      "note": "WorkBuddy casing of qwen3.8-27b (exact curated lookup is case-sensitive). See qwen3.8-27b."
+    },
+    "Qwen3.8-Flash-Next": {
+      "input": 0.1111,
+      "output": 0.375,
+      "note": "WorkBuddy casing of qwen3.8-flash-next (exact curated lookup is case-sensitive). Pinned to the official Qwen3.8-Flash rate. See qwen3.8-flash-next."
+    },
+    "qwen3.8-flash-next": {
+      "input": 0.1111,
+      "output": 0.375,
+      "note": "No standalone published rate for -Next; pinned to the official Qwen3.8-Flash rate verified 2026-09-22 (0.8 / 2.7 RMB per MTok in/out, ~7.2 RMB/USD). Re-check if Alibaba publishes a separate -Next price."
+    },
+    "gemini-3.6-flash": {
+      "input": 0.75,
+      "output": 3.75,
+      "note": "Google Gemini 3.6 Flash public API pricing verified 2026-09-22 via multiple pricing trackers: $0.75 / $3.75 per MTok in/out."
+    },
     "claude-fable-5": {
       "input": 10,
       "output": 50,
