@@ -10,6 +10,8 @@ const { cmdWrapped } = require("./commands/wrapped");
 const { cmdSessions } = require("./commands/sessions");
 const { cmdOptimize } = require("./commands/optimize");
 const { cmdAct } = require("./commands/act");
+const { cmdGuard } = require("./commands/guard");
+const { cmdGuardHook } = require("./commands/guard-hook");
 
 async function run(argv) {
   const [command, ...rest] = argv;
@@ -68,6 +70,12 @@ async function run(argv) {
     case "act":
       await cmdAct(rest);
       return;
+    case "guard":
+      await cmdGuard(rest);
+      return;
+    case "guard-hook":
+      await cmdGuardHook();
+      return;
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -94,6 +102,7 @@ function printHelp() {
       "  npx tokentracker sessions [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--format json|csv] [--out file] [--refresh] [--no-git]",
       "  npx tokentracker optimize [--json] [--since N] [--top N] [--home DIR]",
       "  npx tokentracker act [apply [--yes] [--id PREFIX]] | [undo] | [report] [--json]",
+      "  npx tokentracker guard [on [--soft N] [--hard N] [--checkpoint N] | off | status | limit [...] | allow] [--json]",
       "",
       "Notes:",
       "  - init: consent first, local setup next, browser sign-in last.",
@@ -110,6 +119,7 @@ function printHelp() {
       "  - device-login pairs a headless CLI / SSH session with a browser sign-in (15-min code).",
       "  - sessions exports metadata-only Claude/Codex efficiency analytics; no prompt or response text is retained.",
       "  - optimize scans the local usage queue for cross-model waste and prices each finding; act apply/undo/report make the fixes reversible and re-measured after 3 days.",
+      "  - guard is opt-in: installs PreToolUse/Stop/SessionStart hooks into ~/.claude/settings.json (backed up) that warn/stop on budget and nudge on a no-output session.",
       "",
     ].join("\n"),
   );

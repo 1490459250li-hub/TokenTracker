@@ -233,10 +233,13 @@ module.exports = {
   CLAUDE_USAGE_EVENTS,
   upsertClaudeHook,
   upsertClaudeUsageHooks,
+  upsertClaudeHooks,
   removeClaudeHook,
   removeClaudeUsageHooks,
+  removeClaudeHooks,
   isClaudeHookConfigured,
   areClaudeUsageHooksConfigured,
+  areClaudeHooksConfigured,
   buildClaudeHookCommand,
   buildHookCommand,
   // Aliases for callers that want a name unbiased toward Claude (the schema
