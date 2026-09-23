@@ -1572,6 +1572,105 @@ function createLocalApiHandler({ queuePath }) {
   return async function handleLocalApi(req, res, url) {
     const p = url.pathname;
 
+    // --- TokenTracker feature console (P1–P5) served to the dashboard.
+    // Self-contained + lazy-required so it never affects other endpoints.
+    // Read-only engines are open; anything that mutates files/config requires
+    // the same local-auth token the dashboard already uses for writes. ---
+    if (p.startsWith("/api/p5/")) {
+      const method = String(req.method || "GET").toUpperCase();
+      const home = os.homedir();
+      try {
+        if (p === "/api/p5/snapshot" && method === "GET") {
+          const { aggregateUsage } = require("./usage-queue");
+          const { buildOverviewFromQueue, readOptimizeSavings } = require("./overview");
+          const from = url.searchParams.get("from") || "";
+          const to = url.searchParams.get("to") || "";
+          const agg = aggregateUsage({ home, from, to });
+          let roi = null;
+          if (url.searchParams.get("roi") === "1") {
+            const { computeYield } = require("./yield-engine");
+            const y = await computeYield({ home, from, to });
+            roi = { realized_pct: y.roi.realized_pct, value_at_risk_usd: y.roi.value_at_risk_usd, by_status: y.totals.by_status };
+          }
+          json(res, buildOverviewFromQueue(agg, { roi, savings: readOptimizeSavings(home) }));
+          return true;
+        }
+        if (p === "/api/p5/report" && method === "GET") {
+          const { aggregateUsage } = require("./usage-queue");
+          const { buildOverviewFromQueue, renderOverview, readOptimizeSavings } = require("./overview");
+          const from = url.searchParams.get("from") || "";
+          const to = url.searchParams.get("to") || "";
+          const data = buildOverviewFromQueue(aggregateUsage({ home, from, to }), { savings: readOptimizeSavings(home) });
+          res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(renderOverview(data, { markdown: url.searchParams.get("markdown") === "1" }));
+          return true;
+        }
+        if (p === "/api/p5/optimize" && method === "GET") {
+          const { aggregateUsage } = require("./usage-queue");
+          const { scanWasteFromQueue } = require("./optimize-scan");
+          json(res, scanWasteFromQueue(aggregateUsage({ home })));
+          return true;
+        }
+        if (p === "/api/p5/compare" && method === "GET") {
+          const { aggregateUsage } = require("./usage-queue");
+          const { compareFromQueue } = require("./compare-engine");
+          json(res, compareFromQueue(aggregateUsage({ home, from: url.searchParams.get("from") || "", to: url.searchParams.get("to") || "" })));
+          return true;
+        }
+        if (p === "/api/p5/yield" && method === "GET") {
+          const { computeYield } = require("./yield-engine");
+          json(res, await computeYield({ home, from: url.searchParams.get("from") || "", to: url.searchParams.get("to") || "", minAbandonCost: Number(url.searchParams.get("minCost")) || undefined, top: Number(url.searchParams.get("top")) || undefined }));
+          return true;
+        }
+        if (p === "/api/p5/guard/status" && method === "GET") {
+          json(res, await require("./guard-manager").guardStatus({ home }));
+          return true;
+        }
+        // ---- mutations: require the dashboard's local-auth token ----
+        if (p.startsWith("/api/p5/act/") || p.startsWith("/api/p5/guard/")) {
+          if (!isAuthorizedLocalMutation(req)) { json(res, { error: "unauthorized" }, 403); return true; }
+          if (p === "/api/p5/act/apply" && method === "POST") {
+            const { scanWaste } = require("./optimize-scan");
+            const { applyChanges } = require("./optimize-act");
+            const body = await readJsonBody(req);
+            let findings = (await scanWaste({ home })).findings;
+            if (Array.isArray(body.ids) && body.ids.length) findings = findings.filter((f) => body.ids.includes(f.id));
+            json(res, await applyChanges({ findings, home, yes: Boolean(body.yes) }));
+            return true;
+          }
+          if (p === "/api/p5/act/undo" && method === "POST") { json(res, await require("./optimize-act").undoLast({ home })); return true; }
+          if (p === "/api/p5/act/report" && method === "GET") { json(res, await require("./optimize-act").reportChanges({ home })); return true; }
+          if (p === "/api/p5/guard/on" && method === "POST") {
+            const b = await readJsonBody(req);
+            json(res, await require("./guard-manager").installGuard({ home, soft: b.soft, hard: b.hard, checkpoint: b.checkpoint }));
+            return true;
+          }
+          if (p === "/api/p5/guard/off" && method === "POST") { json(res, await require("./guard-manager").removeGuard({ home })); return true; }
+          if (p === "/api/p5/guard/limit" && method === "POST") {
+            const b = await readJsonBody(req);
+            json(res, await require("./guard-manager").writeConfig(home, { soft: b.soft, hard: b.hard, checkpoint: b.checkpoint }));
+            return true;
+          }
+          if (p === "/api/p5/guard/allow" && method === "POST") { json(res, await require("./guard-manager").grantAllowOnce(home, "_any")); return true; }
+        }
+        const ds = require("./device-sync");
+        if (p === "/api/p5/device/pin" && method === "POST") { json(res, ds.newPin()); return true; }
+        if (p === "/api/p5/device/join" && method === "POST") { const result = ds.join(await readJsonBody(req)); json(res, result, result.ok ? 200 : 401); return true; }
+        if (p === "/api/p5/device/state" && method === "GET") { json(res, ds.snapshot()); return true; }
+        if (p === "/api/p5/device/events" && method === "GET") {
+          res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive" });
+          res.write(": ok\n\n");
+          ds.subscribe(res);
+          return true;
+        }
+        json(res, { error: "not found" }, 404);
+        return true;
+      } catch (error) {
+        json(res, { error: String((error && error.message) || error) }, 500);
+        return true;
+      }
+    }
+
     if (p === "/api/local-auth") {
       if (String(req.method || "GET").toUpperCase() !== "GET") {
         json(res, { error: "Method Not Allowed" }, 405);
