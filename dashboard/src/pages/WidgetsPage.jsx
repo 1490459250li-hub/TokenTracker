@@ -11,6 +11,7 @@ import {
   normalizeMenuBarItems,
 } from "../lib/menu-bar-display.js";
 import { ToggleSwitch } from "../components/settings/Controls.jsx";
+import { OverviewShareCard } from "../ui/dashboard/components/OverviewShareCard.jsx";
 import { FadeIn, StaggerContainer, StaggerItem } from "../ui/foundation/FadeIn.jsx";
 
 /* ---------- SVG widget illustrations ----------
@@ -657,6 +658,13 @@ export function WidgetsPage() {
                 <HeaderCta />
               </div>
             </header>
+          </FadeIn>
+
+          {/* Shareable local overview: cache-hit, fun token 当量, pasteable report */}
+          <FadeIn y={12} delay={0.04}>
+            <section aria-label={copy("share.card.title")} className="mb-12 sm:mb-14">
+              <OverviewShareCard />
+            </section>
           </FadeIn>
 
           {/* Menu Bar — own section, dedicated card */}

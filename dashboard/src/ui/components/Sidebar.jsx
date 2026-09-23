@@ -19,6 +19,8 @@ import {
   Sun,
   Moon,
   Monitor,
+  Wand2,
+  CircleDollarSign,
 } from "lucide-react";
 import { copy } from "../../lib/copy";
 import { cn } from "../../lib/cn";
@@ -50,6 +52,8 @@ export function getNavGroups() {
       label: copy("nav.group.tools"),
       items: [
         { id: "widgets", to: "/widgets", icon: LayoutGrid, label: copy("nav.widgets") },
+        { id: "optimize", to: "/optimize", icon: Wand2, label: copy("nav.optimize") },
+        { id: "roi", to: "/roi", icon: CircleDollarSign, label: copy("nav.roi") },
         { id: "pet", to: "/pet-settings", icon: PawPrint, label: copy("nav.pet") },
         { id: "skills", to: "/skills", icon: Puzzle, label: copy("nav.skills") },
         { id: "ip-check", to: "/ip-check", icon: Globe, label: copy("nav.ip_check") },

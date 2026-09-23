@@ -8,6 +8,7 @@ import { useLimitsDisplayPrefs } from "../hooks/use-limits-display-prefs.js";
 import { copy } from "../lib/copy";
 import { LimitsPageSkeleton } from "../components/LimitsPageSkeleton.jsx";
 import { UsageLimitsPanel } from "../ui/dashboard/components/UsageLimitsPanel.jsx";
+import { BudgetGuardCard } from "../ui/dashboard/components/BudgetGuardCard.jsx";
 import { SubscriptionSettingsCard } from "../ui/dashboard/components/SubscriptionSettingsCard.jsx";
 import { LocalOnlyNotice } from "../components/LocalOnlyNotice.jsx";
 import { isMockEnabled } from "../lib/mock-data";
@@ -180,6 +181,8 @@ export function LimitsPage() {
               </Link>
             </div>
           </div>
+
+          <BudgetGuardCard />
 
           {isLoading ? (
             <LimitsPageSkeleton />

@@ -95,6 +95,8 @@ const SessionsPage = lazy(() =>
 const WidgetsPage = lazy(() =>
   import("./pages/WidgetsPage.jsx").then((m) => ({ default: m.WidgetsPage })),
 );
+const OptimizePage = lazy(() => import("./pages/OptimizePage.jsx"));
+const RoiPage = lazy(() => import("./pages/RoiPage.jsx"));
 const PetPage = lazy(() =>
   import("./pages/PetPage.jsx").then((m) => ({ default: m.PetPage })),
 );
@@ -222,7 +224,9 @@ export default function App() {
   const isIpCheckPath = normalizedPath === "/ip-check";
   const isServiceStatusPath = normalizedPath === "/service-status";
   const isAchievementsPath = normalizedPath === "/achievements";
-  if (isLimitsPath || isSettingsPath || isSkillsPath || isSessionsPath || isWidgetsPath || isPetPath || isIpCheckPath || isServiceStatusPath || isAchievementsPath) gate = "dashboard";
+  const isOptimizePath = normalizedPath === "/optimize";
+  const isRoiPath = normalizedPath === "/roi";
+  if (isLimitsPath || isSettingsPath || isSkillsPath || isSessionsPath || isWidgetsPath || isPetPath || isIpCheckPath || isServiceStatusPath || isAchievementsPath || isOptimizePath || isRoiPath) gate = "dashboard";
 
   let PageComponent = DashboardPage;
   if (profileUserId) {
@@ -247,6 +251,10 @@ export default function App() {
     PageComponent = ServiceStatusPage;
   } else if (isAchievementsPath) {
     PageComponent = AchievementsPage;
+  } else if (isOptimizePath) {
+    PageComponent = OptimizePage;
+  } else if (isRoiPath) {
+    PageComponent = RoiPage;
   }
 
   const showSidebar =
@@ -263,8 +271,9 @@ export default function App() {
       isPetPath ||
       isIpCheckPath ||
       isServiceStatusPath ||
-      isAchievementsPath);
-
+      isAchievementsPath ||
+      isOptimizePath ||
+      isRoiPath);
   // Public-host gating: on www.tokentracker.cc et al. there is no local
   // CLI :7680 to fall back to, so dashboard / settings / etc. require a
   // signed-in user. publicMode (shared link) and the loading state are

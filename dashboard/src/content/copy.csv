@@ -1653,3 +1653,85 @@ limits.devin.setupHint.subtitle,ui,LimitsPage,UsageLimitsPanel,devin_hint_subtit
 limits.devin.setupHint.step1,ui,LimitsPage,UsageLimitsPanel,devin_hint_step1,"Install the Devin CLI and sign in with the command below — TokenTracker picks it up with no restart.",,active
 limits.devin.setupHint.note,ui,LimitsPage,UsageLimitsPanel,devin_hint_note,"Refresh this page after signing in. TokenTracker sends the saved session token only to Devin's official quota endpoint.",,active
 limits.devin.setupHint.snippet_login,ui,LimitsPage,UsageLimitsPanel,devin_hint_snippet_login,"devin auth login",,active
+nav.optimize,shared,*,Sidebar,optimize,"Optimize",,active
+optimize.title,ui,OptimizePage,OptimizePage,title,"Optimization",,active
+optimize.subtitle,ui,OptimizePage,OptimizePage,subtitle,"Find wasted tokens and apply reversible fixes",,active
+optimize.rescan,ui,OptimizePage,OptimizePage,rescan,"Rescan",,active
+optimize.apply_safe,ui,OptimizePage,OptimizePage,apply_safe,"Apply safe fixes",,active
+optimize.apply_all,ui,OptimizePage,OptimizePage,apply_all,"Apply all (incl. config)",,active
+optimize.undo,ui,OptimizePage,OptimizePage,undo,"Undo last",,active
+optimize.report,ui,OptimizePage,OptimizePage,report,"3-day report",,active
+optimize.confirm_apply_all,ui,OptimizePage,OptimizePage,confirm_all,"This will edit files under ~/.claude (backed up first, reversible). Continue?",,active
+optimize.summary,ui,OptimizePage,OptimizePage,summary,"{{sessions}} sessions · est. waste {{tokens}} tokens ≈ {{cost}} · {{count}} findings",,active
+optimize.loading,ui,OptimizePage,OptimizePage,loading,"Scanning…",,active
+optimize.empty,ui,OptimizePage,OptimizePage,empty,"No waste patterns detected.",,active
+optimize.sev.high,ui,OptimizePage,OptimizePage,sev_high,"HIGH",,active
+optimize.sev.medium,ui,OptimizePage,OptimizePage,sev_medium,"MEDIUM",,active
+optimize.sev.low,ui,OptimizePage,OptimizePage,sev_low,"LOW",,active
+optimize.apply_done,ui,OptimizePage,OptimizePage,apply_done,"Applied {{n}} fix(es)",,active
+optimize.undo_done,ui,OptimizePage,OptimizePage,undo_done,"Reverted last batch",,active
+optimize.undo_none,ui,OptimizePage,OptimizePage,undo_none,"Nothing to undo",,active
+optimize.report_done,ui,OptimizePage,OptimizePage,report_done,"Reported: estimated {{est}}, realized {{real}}",,active
+optimize.apply_item,ui,OptimizePage,OptimizePage,apply_item,"Apply this",,active
+optimize.copy_item,ui,OptimizePage,OptimizePage,copy_item,"Copy fix",,active
+optimize.copied,ui,OptimizePage,OptimizePage,copied,"Copied",,active
+optimize.error,ui,OptimizePage,OptimizePage,error,"Error: {{msg}}",,active
+nav.roi,shared,*,Sidebar,roi,"ROI",,active
+roi.title,ui,RoiPage,RoiPage,title,"Return on investment",,active
+roi.subtitle,ui,RoiPage,RoiPage,subtitle,"Did this session's spend actually reach the trunk?",,active
+roi.refresh,ui,RoiPage,RoiPage,refresh,"Refresh",,active
+roi.loading,ui,RoiPage,RoiPage,loading,"Loading…",,active
+roi.empty,ui,RoiPage,RoiPage,empty,"No attributable sessions yet.",,active
+roi.error,ui,RoiPage,RoiPage,error,"Error: {{msg}}",,active
+roi.kpi_total,ui,RoiPage,RoiPage,kpi_total,"Total spend",,active
+roi.kpi_landed,ui,RoiPage,RoiPage,kpi_landed,"Landed in trunk",,active
+roi.kpi_at_risk,ui,RoiPage,RoiPage,kpi_at_risk,"At risk",,active
+roi.kpi_sessions,ui,RoiPage,RoiPage,kpi_sessions,"Sessions",,active
+roi.by_status,ui,RoiPage,RoiPage,by_status,"By outcome",,active
+roi.by_model,ui,RoiPage,RoiPage,by_model,"By model",,active
+roi.worst_title,ui,RoiPage,RoiPage,worst_title,"Costliest without output",,active
+roi.coverage,ui,RoiPage,RoiPage,coverage,"Git attribution covered {{pct}} of spend; the rest is heuristic/unknown.",,active
+roi.status.productive,ui,RoiPage,RoiPage,st_productive,"Productive",,active
+roi.status.reverted,ui,RoiPage,RoiPage,st_reverted,"Reverted",,active
+roi.status.abandoned,ui,RoiPage,RoiPage,st_abandoned,"Abandoned",,active
+roi.status.ambiguous,ui,RoiPage,RoiPage,st_ambiguous,"Ambiguous",,active
+roi.col_model,ui,RoiPage,RoiPage,col_model,"Model",,active
+roi.col_roi,ui,RoiPage,RoiPage,col_roi,"ROI",,active
+roi.col_spend,ui,RoiPage,RoiPage,col_spend,"Spend",,active
+roi.col_status,ui,RoiPage,RoiPage,col_status,"Status",,active
+roi.col_cost,ui,RoiPage,RoiPage,col_cost,"Cost",,active
+roi.col_time,ui,RoiPage,RoiPage,col_time,"When",,active
+guard.card.title,ui,LimitsPage,BudgetGuardCard,card_title,"Budget guard",,active
+guard.card.subtitle,ui,LimitsPage,BudgetGuardCard,card_subtitle,"Opt-in real-time limits for Claude Code (installed as hooks)",,active
+guard.status.enabled,ui,LimitsPage,BudgetGuardCard,st_enabled,"Active",,active
+guard.status.disabled,ui,LimitsPage,BudgetGuardCard,st_disabled,"Inactive",,active
+guard.status.hooks_installed,ui,LimitsPage,BudgetGuardCard,hooks_yes,"Hooks installed",,active
+guard.status.hooks_missing,ui,LimitsPage,BudgetGuardCard,hooks_no,"Hooks not installed yet",,active
+guard.field.soft,ui,LimitsPage,BudgetGuardCard,f_soft,"Soft limit ($)",,active
+guard.field.hard,ui,LimitsPage,BudgetGuardCard,f_hard,"Hard limit ($)",,active
+guard.field.checkpoint,ui,LimitsPage,BudgetGuardCard,f_ckpt,"Checkpoint ($)",,active
+guard.enable,ui,LimitsPage,BudgetGuardCard,enable,"Enable / update",,active
+guard.disable,ui,LimitsPage,BudgetGuardCard,disable,"Disable",,active
+guard.allow_once,ui,LimitsPage,BudgetGuardCard,allow,"Allow once",,active
+guard.confirm_disable,ui,LimitsPage,BudgetGuardCard,confirm_disable,"Remove the guard hooks from ~/.claude/settings.json?",,active
+guard.saved_enabled,ui,LimitsPage,BudgetGuardCard,saved_enabled,"Guard active: soft {{soft}}, hard {{hard}}, checkpoint {{checkpoint}}",,active
+guard.saved_disabled,ui,LimitsPage,BudgetGuardCard,saved_disabled,"Guard disabled",,active
+guard.allowed_once,ui,LimitsPage,BudgetGuardCard,allowed,"Allowed once (90s)",,active
+guard.error,ui,LimitsPage,BudgetGuardCard,error,"Error: {{msg}}",,active
+guard.reload,ui,LimitsPage,BudgetGuardCard,reload,"Reload",,active
+guard.restart_hint,ui,LimitsPage,BudgetGuardCard,restart,"Restart Claude Code to load hooks. Changes are backed up and reversible.",,active
+share.card.title,ui,WidgetsPage,OverviewShareCard,card_title,"Shareable overview",,active
+share.card.subtitle,ui,WidgetsPage,OverviewShareCard,card_subtitle,"Cache hit, token fun-equivalents, and a paste-ready report",,active
+share.loading,ui,WidgetsPage,OverviewShareCard,loading,"Loading…",,active
+share.headline_prefix,ui,WidgetsPage,OverviewShareCard,headline_prefix,"This period",,active
+share.cache_hit,ui,WidgetsPage,OverviewShareCard,cache_hit,"cache hit",,active
+share.eq_code,ui,WidgetsPage,OverviewShareCard,eq_code,"lines of code",,active
+share.eq_words,ui,WidgetsPage,OverviewShareCard,eq_words,"words",,active
+share.eq_pages,ui,WidgetsPage,OverviewShareCard,eq_pages,"pages",,active
+share.eq_books,ui,WidgetsPage,OverviewShareCard,eq_books,"books",,active
+share.eq_earth,ui,WidgetsPage,OverviewShareCard,eq_earth,"earth laps",,active
+share.report_title,ui,WidgetsPage,OverviewShareCard,report_title,"Monthly report",,active
+share.markdown,ui,WidgetsPage,OverviewShareCard,markdown,"Markdown",,active
+share.copy_report,ui,WidgetsPage,OverviewShareCard,copy_report,"Copy report",,active
+share.copied,ui,WidgetsPage,OverviewShareCard,copied,"Copied",,active
+share.empty,ui,WidgetsPage,OverviewShareCard,empty,"No data in this window.",,active
