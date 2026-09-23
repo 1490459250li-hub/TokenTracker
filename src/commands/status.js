@@ -61,6 +61,8 @@ const {
   resolveOmpAgentDir,
   resolveOmoSessionFiles,
   resolveOmoAgentDir,
+  resolveMinimaxCodeSessionFiles,
+  resolveMinimaxCodeSessionsDir,
   resolvePiSessionFiles,
   resolvePiAgentDir,
   piAgentDirCollidesWithOmp,
@@ -456,6 +458,11 @@ async function cmdStatus(argv = []) {
   const omoAgentDir = resolveOmoAgentDir(process.env);
   const omoInstalled = Boolean(omoAgentDir) && fssync.existsSync(path.join(omoAgentDir, "sessions"));
   const omoFiles = omoInstalled ? resolveOmoSessionFiles(process.env) : [];
+
+  // MiniMax Code — passive scan only (no hooks).
+  const minimaxCodeSessionsDir = resolveMinimaxCodeSessionsDir(process.env);
+  const minimaxCodeInstalled = Boolean(minimaxCodeSessionsDir) && fssync.existsSync(minimaxCodeSessionsDir);
+  const minimaxCodeFiles = minimaxCodeInstalled ? resolveMinimaxCodeSessionFiles(process.env) : [];
 
   // pi (@mariozechner/pi-coding-agent) — passive scan only (no hooks).
   // Skip when its agent dir collides with omp's; sync would dedupe anyway.
@@ -1000,6 +1007,9 @@ async function cmdStatus(argv = []) {
         omo: omoInstalled
           ? { installed: true, files: omoFiles.length }
           : { installed: false },
+        minimax_code: minimaxCodeInstalled
+          ? { installed: true, files: minimaxCodeFiles.length }
+          : { installed: false },
         pi: piInstalled
           ? { installed: true, files: piFiles.length }
           : { installed: false },
@@ -1168,6 +1178,9 @@ async function cmdStatus(argv = []) {
         : null,
       omoInstalled
         ? `- OmO: passive reader (${omoFiles.length} session jsonl file${omoFiles.length !== 1 ? "s" : ""} found)`
+        : null,
+      minimaxCodeInstalled
+        ? `- MiniMax Code: passive reader (${minimaxCodeFiles.length} session jsonl file${minimaxCodeFiles.length !== 1 ? "s" : ""} found)`
         : null,
       piInstalled
         ? `- pi: passive reader (${piFiles.length} session jsonl file${piFiles.length !== 1 ? "s" : ""} found)`

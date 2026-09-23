@@ -69,6 +69,7 @@ const {
   resolvePiAgentDir,
   piAgentDirCollidesWithOmp,
   resolvePrimeAgentDir,
+  resolveMinimaxCodeSessionsDir,
   resolveLmstudioLogFiles,
   resolveUnslothDbPath,
   resolveAnythingllmDbPath,
@@ -150,6 +151,7 @@ const SUPPORTED_PROVIDERS = [
   "LM Studio",
   "Unsloth Studio",
   "Devin CLI",
+  "MiniMax Code",
 ];
 
 async function cmdInit(argv) {
@@ -805,6 +807,14 @@ async function applyIntegrationSetup({
     const primeAgentDir = resolvePrimeAgentDir(process.env);
     if (primeAgentDir && fssync.existsSync(path.join(primeAgentDir, "sessions"))) {
       summary.push({ label: "Prime Agent", status: "detected", detail: "Passive usage reader (no hook needed)" });
+    }
+  }
+
+  // MiniMax Code: passive reader of ~/.minimax/v2/sessions — no hook installation needed.
+  {
+    const minimaxCodeSessionsDir = resolveMinimaxCodeSessionsDir(process.env);
+    if (minimaxCodeSessionsDir && fssync.existsSync(minimaxCodeSessionsDir)) {
+      summary.push({ label: "MiniMax Code", status: "detected", detail: "Passive usage reader (no hook needed)" });
     }
   }
 
