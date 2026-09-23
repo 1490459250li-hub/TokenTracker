@@ -3465,7 +3465,7 @@ function deriveOpencodeMessageFingerprint({ msg, totals, source }) {
     totals.reasoning_output_tokens,
     model,
     provider,
-  ].join(" ");
+  ].join("\u0000");
   // Hashed rather than stored raw: the fingerprint is persisted per message in
   // cursors.json, and heavy OpenCode users carry tens of thousands of entries.
   return crypto.createHash("sha256").update(raw).digest("base64url").slice(0, 22);
