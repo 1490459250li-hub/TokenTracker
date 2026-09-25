@@ -113,7 +113,7 @@ workbuddy · zcode · zed
 - ShareModal 中遗留的 `insforge` 裸引用（已修复运行时崩溃）
 
 **官方 v0.98 ~ v1.0.7 本分支未合入**
-- MiniMax Code / OmO / Devin 等新数据源
+- MiniMax Code 数据源（官方 v1.0.0 新增；OmO、Devin 在 v0.97.2 基线中已含，本分支有）
 - DeepSeek V4.1 Flash、Tencent Hy4、GPT-6 Sol 定价
 - 万亿级 `T` 后缀、宠物隐藏 Alt+Tab 等桌面修复
 
