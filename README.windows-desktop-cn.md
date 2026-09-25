@@ -2,7 +2,7 @@
 
 > 本分支基于 [TokenTracker v0.97.2](https://github.com/xiufengsun/TokenTracker)（MIT License）二次开发，
 > 面向 **Windows 桌面用户**，聚焦**数据 100% 本地**、**API 直连**与**国产大模型**生态。
-> 在上游 39 个数据源基础上，新增 5 个 API 直连/小浣熊来源，共 **44 个**。
+> 在上游 v0.97.2 的 39 个数据源基础上，本分支新增 4 个 API 直连/小浣熊来源，并合入官方 MiniMax Code 源，共 **44 个主动扫描源**；另有 `sensenova-api` 经 shim 记账进统计。
 >
 > 与上游 `main` 保持独立并行，不合并、不覆盖。本文件是此分支的专属说明，
 > 不替换上游的 `README.md` / `README.zh-CN.md`。
@@ -87,7 +87,7 @@
 
 ## 数据源清单
 
-**44 个可统计来源**（上游 v0.97.2 有 39 个主动扫描源，本分支新增 4 个主动源 + 1 个 shim 记账源；
+**44 个主动扫描源**（上游 v0.97.2 基线 39 个 + 本分支新增 4 个 + 官方 v1.0.0 合入的 MiniMax Code；
 只读本地会话日志，不读 prompt、不读文件内容）：
 
 ```
@@ -112,12 +112,22 @@ workbuddy · zcode · zed
 - posthog 遥测 SDK 等所有 telemetry
 - ShareModal 中遗留的 `insforge` 裸引用（已修复运行时崩溃）
 
-**官方 v0.98 ~ v1.0.7 本分支未合入**
-- MiniMax Code 数据源（官方 v1.0.0 新增；OmO、Devin 在 v0.97.2 基线中已含，本分支有）
-- DeepSeek V4.1 Flash、Tencent Hy4、GPT-6 Sol 定价
-- 万亿级 `T` 后缀、宠物隐藏 Alt+Tab 等桌面修复
+**已合入：官方 v0.97.2 ~ v1.0.7 可用功能（cherry-pick）**
+- **按行定价修复**（v0.99.0）：model-breakdown 逐行 `computeRowCost`，与首页成本对齐（修复 Fast 档/长上下文/厂商自报成本被求和吞掉的问题）
+- **DeepSeek V4.1 Flash 定价**（v0.98.0）：`deepseek-v4.1-flash` / `deepseek-flash` 官方价，含峰谷减半
+- **MiniMax Code 数据源**（v1.0.0）：新增 `minimax-code`，读 `~/.minimax/v2/sessions/**/messages.jsonl`
+- **Reasonix Windows 路径修复**（v0.99.0）：找 `%APPDATA%
+easonix`，并从根递归扫描
+- **mimocode.db Windows 路径修复**（v1.0.6）：MiMo Code 数据在 Windows 也能找到
+- **宠物隐藏 Alt+Tab / Win+Tab**（v1.0.6）：加 `WS_EX_TOOLWINDOW`，任务切换器不再显示宠物
+- **Antigravity 缓存/推理 token 读取**（v0.98.0）：从 sqlite usage metadata 读 cached input + reasoning tokens
 
-如需融合官方新功能，只需 cherry-pick 相关提交（`posthog-js` 依赖需手动剔除）。
+**仍未合入（按隐私/平台原则不引入）**
+- posthog-js 遥测 SDK、云同步/边缘函数（edge-patches 相关）、leaderboard/成就系统
+- 官方 macOS / Linux 专属修复（灵动岛、托盘贴边等）
+- Tencent Hy4、GPT-6 Sol 定价（用到再补）
+
+> 万亿级计数本分支已具备：`format-tokens.js` 输出 `T` 后缀，`format.ts` 输出中文「万亿」。
 
 ---
 
