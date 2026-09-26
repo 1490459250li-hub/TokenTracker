@@ -63,6 +63,7 @@ timestamps, never prompts, responses, or source code.
 - LM Studio
 - Unsloth Studio
 - Devin CLI
+- Cline
 - MiniMax Code
 - Command Code
 - TRAE

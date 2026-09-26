@@ -7,6 +7,13 @@
     "user_pending_note": "本 fork 补充定价说明：MiMo 系列单价已按官方定价页 https://mimo.mi.com/docs/zh-CN/pricing（2026-09-21 更新）内置美元牌价（input=未命中缓存输入，cache_read=命中缓存，cache_write=0 因官方缓存写入限时免费）；日日新 Token Plan 为官方 0 元公测档（按次数计费，无 token 单价），保持 0 值。汇率换算参考官方海外美元牌价，避免二次换算误差。"
   },
   "exact": {
+    "cline-gateway-models": {
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "note": "Cline's own gateway namespaces (`cline-free/*` free tier, `cline-pass/*` flat-rate Cline Pass). Cline's shipped model catalog declares pricing 0 for every id in both namespaces, so a turn there has no marginal per-token cost — same convention as PI_SUBSCRIPTION_SOURCES. The fuzzy entries at the top of `fuzzy` route both prefixes here BEFORE the model names can match a public rate (`cline-pass/glm-5.3` must not bill GLM-5.3 list price, `cline-free/deepseek-v4.1-flash` must not bill DeepSeek). Verified against Cline 0.0.32 (/Applications/Cline.app model catalog + `usageDelta` cost, which stays 0 for both namespaces). A Cline turn that DOES report a positive per-call cost is honoured first because `cline` is listed in SOURCES_WITH_AUTHORITATIVE_COST in pricing/index.js. Remove or re-point these entries when Cline publishes per-token pricing for either namespace."
+    },
     "claude-fable-5": {
       "input": 10,
       "output": 50,
@@ -895,6 +902,14 @@
     }
   },
   "fuzzy": [
+    {
+      "match": "cline-free/",
+      "ref": "cline-gateway-models"
+    },
+    {
+      "match": "cline-pass/",
+      "ref": "cline-gateway-models"
+    },
     {
       "match": "gpt-6-astra",
       "ref": "gpt-6-astra"
