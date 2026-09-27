@@ -154,6 +154,7 @@ internal sealed class QuotaWidgetWindow : Window
             case "quota:ready": _ready = true; _lastContext = null; PushContext(); break;
             case "quota:expand": ResizeWidget(true); break;
             case "quota:collapse": ResizeWidget(false); break;
+            case "quota:close": SetEnabled(false); break;
             case "quota:dashboard": _openDashboard(); break;
             case "quota:drag":
                 ReleaseCapture();

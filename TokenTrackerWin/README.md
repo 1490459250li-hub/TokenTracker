@@ -12,6 +12,11 @@ tray** application.
 
 ### Desktop quota
 
+Use the top-right **Close widget** button in either view to hide it. This disables
+the widget persistently (including after restart); reopen it from **Desktop quota**
+in the tray menu. Closing the widget does not quit the app.
+
+
 Right-click the tray icon and enable **Desktop quota**. The 320 × 144 DIP
 surface shows two remaining-quota bars and actual reset countdowns; click to expand to 360 × 340 DIP.
 Use the sliders button to choose up to two provider windows, drag the grip to

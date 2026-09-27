@@ -607,5 +607,7 @@
   "quota.unavailable": "选中的额度暂不可用",
   "quota.dashboard": "打开主界面",
   "quota.pick_two": "最多关注两个周期",
-  "quota.reset_in": "{{time}}后重置"
+  "quota.reset_in": "{{time}}后重置",
+  "quota.close": "关闭组件",
+  "quota.close_hint": "关闭组件；可从托盘菜单重新打开"
 }

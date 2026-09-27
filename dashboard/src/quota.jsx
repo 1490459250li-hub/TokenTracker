@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ChevronDown, ChevronUp, GripHorizontal, Settings2, ArrowUpRight, Check } from "lucide-react";
+import { ChevronDown, ChevronUp, GripHorizontal, Settings2, ArrowUpRight, Check, X } from "lucide-react";
 import { copy, setCopyLocale } from "./lib/copy";
 import { desktopQuotaRows, selectQuotaRows, mergeQuotaSnapshot, quotaPeriodLabel, quotaResetCountdown } from "./lib/desktop-quota.js";
 import { limitProviderName } from "./lib/limits-providers.js";
@@ -52,7 +52,8 @@ export function QuotaWidget() {
         onPointerMove={event => { if (drag.current && event.buttons === 1 && Math.hypot(event.clientX - drag.current.x, event.clientY - drag.current.y) > 4) { drag.current = null; send("quota:drag"); } }}
         onPointerUp={() => { drag.current = null; }}><GripHorizontal size={14} /></button>
       {expanded && <button aria-label={copy("quota.choose")} onClick={() => setSettings(value => !value)} aria-pressed={settings}><Settings2 size={13} /></button>}
-      <button aria-label={copy(expanded ? "quota.collapse" : "quota.expand")} aria-expanded={expanded} onClick={toggle}>{expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
+      <button className="quota-toggle" aria-label={copy(expanded ? "quota.collapse" : "quota.expand")} aria-expanded={expanded} onClick={toggle}>{expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
+      <button className="quota-close" aria-label={copy("quota.close")} title={copy("quota.close_hint")} onClick={() => send("quota:close")}><X size={14} /></button>
     </header>
     {!expanded ? <button className="quota-summary" onClick={toggle} aria-label={copy("quota.expand")}>
       {compact.length ? compact.map(row => <span className={`compact-metric ${row.remaining <= 10 ? "low" : ""}`} key={row.id} title={`${limitProviderName(row.provider)} · ${label(row)} · ${copy("quota.remaining")}`}><span className="compact-name">{limitProviderName(row.provider)}</span><span className="compact-reading"><strong>{remaining(row)}<small>{copy("quota.percent")}</small></strong></span><span className="compact-reset" title={Number.isFinite(row.resetMs) ? copy("quota.resets", {time: new Intl.DateTimeFormat(context.locale || undefined, {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(row.resetMs))}) : undefined}>{resetText(row)}</span><span className="compact-track quota-track" aria-hidden="true"><span style={{ width: `${row.remaining}%` }} /></span></span>) : <span className="empty-compact">{copy(context.limits ? rows.length ? "quota.unavailable" : "quota.empty" : "quota.loading")}</span>}

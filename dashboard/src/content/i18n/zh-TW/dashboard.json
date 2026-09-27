@@ -666,5 +666,7 @@
   "quota.unavailable": "選中的額度暫不可用",
   "quota.dashboard": "開啟主介面",
   "quota.pick_two": "最多關注兩個週期",
-  "quota.reset_in": "{{time}}後重置"
+  "quota.reset_in": "{{time}}後重置",
+  "quota.close": "關閉元件",
+  "quota.close_hint": "關閉元件；可從系統匣選單重新開啟"
 }

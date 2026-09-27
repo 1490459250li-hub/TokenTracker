@@ -20,7 +20,7 @@ svg { flex-shrink:0; }
 .quota header .drag-handle svg { display:none; }
 .drag-handle::after { content:""; width:22px; height:3px; border-radius:3px; background:currentColor; opacity:.5; }
 .quota:not(.expanded) header { position:absolute; height:10px; top:0; left:12px; right:12px; z-index:1; }
-.quota:not(.expanded) header>button:last-child { display:none; }
+.quota:not(.expanded) header>.quota-toggle { display:none; }
 .quota:not(.expanded) .drag-handle { position:absolute; left:calc(50% - 22px); width:44px; height:10px; opacity:0; transition:opacity .2s; }
 .quota:not(.expanded):hover .drag-handle,.quota:not(.expanded):focus-within .drag-handle { opacity:1; }
 .quota-status { display:none; }
@@ -65,3 +65,9 @@ header button:hover,footer button:hover,.quota-choice:hover { background:var(--t
 @keyframes quota-reveal { from { opacity:.5; transform:translateY(-3px); } to { opacity:1; transform:translateY(0); } }
 @media(prefers-reduced-motion:reduce) { *,*::after { animation:none!important; transition:none!important; } .quota-track>span::after { display:none; } }
 @media(forced-colors:active) { .quota { border:1px solid CanvasText; } .quota-track { forced-color-adjust:none; --track:GrayText; --accent-start:Highlight; --accent-end:Highlight; } }
+
+.quota:not(.expanded) header { height:22px; top:2px; left:8px; right:8px; }
+.quota:not(.expanded) .quota-close { margin-left:auto; width:24px; height:22px; }
+.quota:not(.expanded) .drag-handle { height:16px; }
+.quota-summary { padding-top:24px; padding-bottom:11px; }
+.quota-close:hover { color:var(--fg); }

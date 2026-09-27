@@ -26,3 +26,16 @@ describe("desktop quota interactions", () => {
     expect(postMessage).toHaveBeenCalledWith("quota:collapse");
   });
 });
+
+it("closes from compact and expanded views without expanding or opening the dashboard", () => {
+  const postMessage = vi.fn();
+  window.chrome = { webview: { postMessage, addEventListener: vi.fn(), removeEventListener: vi.fn() } };
+  render(<QuotaWidget />);
+  postMessage.mockClear();
+  fireEvent.click(screen.getByRole("button", {name:"Close widget"}));
+  expect(postMessage.mock.calls).toEqual([["quota:close"]]);
+  fireEvent.click(screen.getAllByRole("button", {name:"Expand limits"})[0]);
+  postMessage.mockClear();
+  fireEvent.click(screen.getByRole("button", {name:"Close widget"}));
+  expect(postMessage.mock.calls).toEqual([["quota:close"]]);
+});
