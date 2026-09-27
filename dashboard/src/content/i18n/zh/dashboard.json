@@ -591,5 +591,21 @@
   "subscriptions.form.provider": "关联工具",
   "subscriptions.form.provider_required": "请选择关联的工具",
   "subscriptions.form.provider_taken": "该工具已有订阅，请编辑现有记录",
-  "subscriptions.form.provider_taken_suffix": "（已有订阅）"
+  "subscriptions.form.provider_taken_suffix": "（已有订阅）",
+  "quota.title": "限额",
+  "quota.remaining": "剩余",
+  "quota.stale": "数据未更新",
+  "quota.drag": "拖动调整位置",
+  "quota.choose": "选择额度",
+  "quota.collapse": "收起",
+  "quota.expand": "展开限额",
+  "quota.empty": "请在主界面连接服务",
+  "quota.loading": "正在读取限额…",
+  "quota.awaiting": "等待额度更新",
+  "quota.resets": "重置于 {{time}}",
+  "quota.no_reset": "暂无重置时间",
+  "quota.unavailable": "选中的额度暂不可用",
+  "quota.dashboard": "打开主界面",
+  "quota.pick_two": "最多关注两个周期",
+  "quota.reset_in": "{{time}}后重置"
 }

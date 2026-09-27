@@ -22,6 +22,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly UsagePoller _poller;
     private DashboardWindow? _dashboard;
     private PetWindow? _petWindow;
+    private QuotaWidgetWindow? _quotaWindow;
+    private readonly ToolStripMenuItem _quotaItem;
 
     private readonly ContextMenuStrip _menu;
     private readonly TrayMenuRenderer _menuRenderer;
@@ -97,6 +99,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _summaryItem = CreateMenuItem("", (_, _) => OpenDashboard());
         _openDashboardItem = CreateMenuItem("", (_, _) => OpenDashboard());
         _syncItem = CreateMenuItem("", (_, _) => _server.TriggerSync());
+        _quotaItem = CreateMenuItem("", (_, _) => ToggleQuota());
         _petItem = CreateMenuItem("", (_, _) => TogglePet());
         _petSizeSmall = CreateMenuItem("", (_, _) => SetPetSize(PetWindow.SizeSmall));
         _petSizeMedium = CreateMenuItem("", (_, _) => SetPetSize(PetWindow.SizeMedium));
@@ -180,6 +183,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _menu.Items.Add(CreateSeparator());
         _menu.Items.Add(_openDashboardItem);
         _menu.Items.Add(_syncItem);
+        _menu.Items.Add(_quotaItem);
         _menu.Items.Add(_petItem);
         _menu.Items.Add(_petSizeItem);
         _menu.Items.Add(_petCharacterItem);
@@ -223,6 +227,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _server.SyncCompleted += OnSyncCompleted;
         _poller.StatsUpdated += OnStatsUpdated;
         _poller.LimitsUpdated += OnLimitsUpdated;
+        _poller.LimitsFailed += () => PostToUi(() => _quotaWindow?.MarkFailed());
         _refreshTimer.Tick += (_, _) => RefreshSummary();
         _syncTimer.Tick += (_, _) => TriggerBackgroundSync();
         _refreshTimer.Start();
@@ -237,6 +242,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         // auto-opens. A stored preference (user toggled the pet at least once) always
         // wins; only first launches fall back to the show-on-manual-run default.
         // Deferred onto the dispatcher so it shows once the message pump is running.
+        _quotaWindow = new QuotaWidgetWindow(_server, OpenDashboard);
+        _quotaWindow.EnabledChanged += () => { _quotaItem.Checked = _quotaWindow.Enabled; UpdateLimitsPolling(); };
+        _quotaItem.Checked = _quotaWindow.Enabled;
+        if (_quotaWindow.Enabled)
+            _uiDispatcher.BeginInvoke(new Action(() => { _quotaWindow.SetEnabled(true); UpdateLimitsPolling(); _poller.RefreshNow(); }));
+
         if (PetWindow.StoredVisible ?? showPetOnLaunch)
         {
             _uiDispatcher.BeginInvoke(new Action(() =>
@@ -244,11 +255,23 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 EnsurePet();
                 _petWindow!.ShowPet();
                 _poller.IncludeRichStats = true;   // gather the pet's quip-pool stats
-                _poller.IncludeLimits = true;
+                UpdateLimitsPolling();
                 UpdatePetMenuText();
                 RefreshSummary();
             }));
         }
+    }
+
+    private void UpdateLimitsPolling() => _poller.IncludeLimits = _petWindow?.IsVisible == true || _quotaWindow?.Enabled == true;
+
+    private void ToggleQuota()
+    {
+        _quotaWindow ??= new QuotaWidgetWindow(_server, OpenDashboard);
+        _quotaWindow.SetEnabled(!_quotaWindow.Enabled);
+        _quotaItem.Checked = _quotaWindow.Enabled;
+        if (_lastLimitsJson is not null) _quotaWindow.ApplyLimits(_lastLimitsJson);
+        UpdateLimitsPolling();
+        if (_quotaWindow.Enabled) _poller.RefreshNow();
     }
 
     private ToolStripMenuItem CreateMenuItem(string text, EventHandler onClick)
@@ -313,6 +336,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _summaryItem.Text = $"{_strings.TodayTitle}: {_strings.NoData}";
         _openDashboardItem.Text = _strings.OpenDashboard;
         _syncItem.Text = _strings.SyncNow;
+        _quotaItem.Text = QuotaWidgetWindow.QuotaMenuText();
         UpdatePetMenuText();
         _petSizeItem.Text = _strings.PetSize;
         _petSizeSmall.Text = _strings.SizeSmall;
@@ -429,7 +453,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         // The pet's quip pool needs the heatmap + model-breakdown stats; only gather them
         // (two extra calls per poll) while the pet is actually on screen.
         _poller.IncludeRichStats = _petWindow.IsVisible;
-        _poller.IncludeLimits = _petWindow.IsVisible;
+        UpdateLimitsPolling();
         if (_petWindow.IsVisible)
         {
             RefreshSummary();      // push the current numbers right away
@@ -598,7 +622,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _petWindow.HidePet();
         _petWindow.StoreVisible(false);
         _poller.IncludeRichStats = false;   // stop gathering the pet-only stats
-        _poller.IncludeLimits = false;
+        UpdateLimitsPolling();
         UpdatePetMenuText();
         PushDashboardPetSettings();
     }
@@ -646,7 +670,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     _petWindow!.ShowPet();
                     _petWindow.StoreVisible(true);
                     _poller.IncludeRichStats = true;
-                    _poller.IncludeLimits = true;
+                    UpdateLimitsPolling();
                     _poller.RefreshNow();
                 }
                 else
@@ -654,7 +678,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     _petWindow!.HidePet();
                     _petWindow.StoreVisible(false);
                     _poller.IncludeRichStats = false;
-                    _poller.IncludeLimits = false;
+                    UpdateLimitsPolling();
                 }
                 UpdatePetMenuText();
                 // Echo the applied state back; the size/character cases push inside
@@ -847,6 +871,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             _lastLimitsJson = limitsJson;
             _petWindow?.ApplyLimits(limitsJson);
+            _quotaWindow?.ApplyLimits(limitsJson);
         });
     }
 
@@ -1008,6 +1033,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void Quit()
     {
+        _quotaWindow?.Shutdown();
         _refreshTimer.Stop();
         _syncTimer.Stop();
         _trayIcon.Visible = false;
@@ -1031,6 +1057,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _summaryFont?.Dispose();
             _dashboard?.Shutdown();   // WPF Window has no Dispose; really close it
             _petWindow?.Shutdown();
+            _quotaWindow?.Shutdown();
         }
         base.Dispose(disposing);
     }

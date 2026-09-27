@@ -18,6 +18,7 @@ public sealed class UsagePollerAccountAuthorityTests
     private const string SummaryPath = "/functions/tokentracker-usage-summary";
     private const string HeatmapPath = "/functions/tokentracker-usage-heatmap";
     private const string ModelsPath = "/functions/tokentracker-usage-model-breakdown";
+    private const string LimitsPath = "/functions/tokentracker-usage-limits";
 
     /// <summary>Headers a response carries: null = the account view was served.</summary>
     private sealed record Authority(string View, string? Fallback)
@@ -44,6 +45,7 @@ public sealed class UsagePollerAccountAuthorityTests
         public Authority ModelsAuthority = Authority.Account;
         public long SummaryTokens = 1_000;
         public int HeatmapStreak = 7;
+        public bool FailLimits;
 
         public FakeLocalServer()
         {
@@ -83,7 +85,7 @@ public sealed class UsagePollerAccountAuthorityTests
 
                     var payload = Encoding.UTF8.GetBytes(body);
                     var head = new StringBuilder()
-                        .Append("HTTP/1.1 200 OK\r\n")
+                        .Append(path == LimitsPath && FailLimits ? "HTTP/1.1 503 Unavailable\r\n" : "HTTP/1.1 200 OK\r\n")
                         .Append("Content-Type: application/json\r\n")
                         .Append("Content-Length: ").Append(payload.Length).Append("\r\n")
                         .Append("X-TokenTracker-Account-View: ").Append(authority.View).Append("\r\n");
@@ -162,6 +164,23 @@ public sealed class UsagePollerAccountAuthorityTests
     }
 
     private static readonly TimeSpan Publishes = TimeSpan.FromSeconds(10);
+
+    [Fact]
+    public async Task QuotaFailureIsReportedAndTheNextRefreshRecovers()
+    {
+        using var server = new FakeLocalServer { FailLimits = true };
+        using var poller = new UsagePoller(() => server.BaseUrl) { IncludeLimits = true };
+        var failed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var recovered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        poller.LimitsFailed += () => failed.TrySetResult(true);
+        poller.LimitsUpdated += json => recovered.TrySetResult(json);
+        poller.RefreshNow();
+        await failed.Task.WaitAsync(Publishes);
+        Assert.False(recovered.Task.IsCompleted);
+        server.FailLimits = false;
+        poller.RefreshNow();
+        Assert.Equal("{}", await recovered.Task.WaitAsync(Publishes));
+    }
     // Long enough for the poll to finish and decide not to publish.
     private static readonly TimeSpan NoPublish = TimeSpan.FromSeconds(3);
 

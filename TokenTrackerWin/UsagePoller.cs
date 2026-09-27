@@ -73,6 +73,7 @@ internal sealed class UsagePoller : IDisposable
 
     /// <summary>Raised with the raw local usage-limits JSON so each pet client can select its own display line.</summary>
     public event Action<string>? LimitsUpdated;
+    public event Action? LimitsFailed;
 
     public UsagePoller(Func<string> baseUrl) => _baseUrl = baseUrl;
 
@@ -142,7 +143,11 @@ internal sealed class UsagePoller : IDisposable
                 if (includeLimits && limitsTask is not null)
                 {
                     var limits = await limitsTask;
-                    if (limits is not null && !token.IsCancellationRequested) RaiseLimitsUpdated(limits);
+                    if (!token.IsCancellationRequested)
+                    {
+                        if (limits is not null) RaiseLimitsUpdated(limits);
+                        else LimitsFailed?.Invoke();
+                    }
                 }
             }
         }

@@ -650,5 +650,21 @@
   "subscriptions.form.provider": "關聯工具",
   "subscriptions.form.provider_required": "請選擇關聯的工具",
   "subscriptions.form.provider_taken": "該工具已有訂閱，請編輯現有記錄",
-  "subscriptions.form.provider_taken_suffix": "（已有訂閱）"
+  "subscriptions.form.provider_taken_suffix": "（已有訂閱）",
+  "quota.title": "限額",
+  "quota.remaining": "剩餘",
+  "quota.stale": "資料未更新",
+  "quota.drag": "拖動調整位置",
+  "quota.choose": "選擇額度",
+  "quota.collapse": "收起",
+  "quota.expand": "展開限額",
+  "quota.empty": "請在主介面連接服務",
+  "quota.loading": "正在讀取限額…",
+  "quota.awaiting": "等待額度更新",
+  "quota.resets": "重置於 {{time}}",
+  "quota.no_reset": "暫無重置時間",
+  "quota.unavailable": "選中的額度暫不可用",
+  "quota.dashboard": "開啟主介面",
+  "quota.pick_two": "最多關注兩個週期",
+  "quota.reset_in": "{{time}}後重置"
 }
