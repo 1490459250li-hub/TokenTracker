@@ -1438,3 +1438,68 @@ test("Command Code rebuilds a transcript that changes during its cached header r
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Command Code retries an equal-size rewrite between a full read and its final descriptor stat", async () => {
+  const { dir, filePath, options } = makeLifecycleTree();
+  const originalOpen = fsp.open;
+  const beforeStat = fs.statSync(filePath);
+  const originalText = fs.readFileSync(filePath, "utf8");
+  const replacement = originalText.replace(
+    messageLine({ id: "m1", costUsd: 0.42 }),
+    messageLine({ id: "m2", inputTokens: 2000, outputTokens: 200, costUsd: 0.84 }),
+  );
+  assert.notEqual(replacement, originalText);
+  assert.equal(Buffer.byteLength(replacement), beforeStat.size, "the concurrent rewrite has exactly the same byte length");
+  let rewritten = false;
+  try {
+    fsp.open = async function (file, ...args) {
+      const handle = await originalOpen.call(this, file, ...args);
+      if (file !== filePath) return handle;
+      const readFile = handle.readFile.bind(handle);
+      handle.readFile = async (...values) => {
+        const data = await readFile(...values);
+        if (!rewritten) {
+          fs.writeFileSync(filePath, replacement);
+          fs.utimesSync(filePath, beforeStat.atime, new Date(beforeStat.mtimeMs + 60_000));
+          rewritten = true;
+        }
+        return data;
+      };
+      return handle;
+    };
+    await parseCommandCodeIncremental(options);
+    assert.equal(rewritten, true);
+    assert.equal(fs.statSync(filePath).size, beforeStat.size);
+    assert.notEqual(fs.statSync(filePath).mtimeMs, beforeStat.mtimeMs, "the fixture forces an observable metadata change");
+    assert.deepEqual(commandCodeRows(options.queuePath), [LIFECYCLE_ROW]);
+    assert.deepEqual(commandCodeRows(options.projectQueuePath), [lifecycleProjectRow()]);
+
+    fsp.open = originalOpen;
+    roundTripLifecycleCursors(options);
+    const recovered = await parseCommandCodeIncremental(options);
+    const corrected = {
+      ...LIFECYCLE_TOTALS, input_tokens: 2000, output_tokens: 200,
+      total_tokens: 2200, billable_total_tokens: 2200, total_cost_usd: 0.84,
+    };
+    assert.equal(commandCodeRows(options.queuePath).at(-1).total_tokens, 2200);
+    assert.equal(recovered.recordsProcessed, 1, "an ordinary subsequent sync must reread the unstable snapshot");
+    assert.deepEqual(commandCodeRows(options.queuePath), [LIFECYCLE_ROW, { ...LIFECYCLE_ROW, ...corrected }]);
+    assert.deepEqual(commandCodeRows(options.projectQueuePath), [
+      lifecycleProjectRow(), lifecycleProjectRow("acme/lifecycle-fixture", corrected),
+    ]);
+    assert.deepEqual(Object.keys(options.cursors.commandCode.messages), [`command-code:m2|${T0}`]);
+    const hourlyBytes = fs.readFileSync(options.queuePath);
+    const projectBytes = fs.readFileSync(options.projectQueuePath);
+    roundTripLifecycleCursors(options);
+    const repeat = await parseCommandCodeIncremental(options);
+    assert.equal(repeat.recordsProcessed, 0);
+    assert.equal(repeat.eventsAggregated, 0);
+    assert.equal(repeat.bucketsQueued, 0);
+    assert.equal(repeat.projectBucketsQueued, 0);
+    assert.deepEqual(fs.readFileSync(options.queuePath), hourlyBytes);
+    assert.deepEqual(fs.readFileSync(options.projectQueuePath), projectBytes);
+  } finally {
+    fsp.open = originalOpen;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

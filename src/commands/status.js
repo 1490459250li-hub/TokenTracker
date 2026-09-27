@@ -729,10 +729,19 @@ async function cmdStatus(argv = []) {
   const dshSessionsDir = dshHomes.map((homeDir) => path.join(homeDir, "sessions")).join(", ");
   const dshSessionFiles = await resolveDshSessionFiles(process.env);
   const dshInstalled = dshSessionFiles.length > 0;
-  const commandCodeProjectsDir = resolveCommandCodeHomes(process.env)
-    .map((homeDir) => path.join(homeDir, "projects"))
-    .join(", ");
-  const commandCodeSessionFiles = await resolveCommandCodeSessionFiles(process.env);
+  let commandCodeProjectsDir = "";
+  let commandCodeSessionFiles = [];
+  let commandCodeDiscoveryError = null;
+  try {
+    commandCodeProjectsDir = resolveCommandCodeHomes(process.env)
+      .map((homeDir) => path.join(homeDir, "projects"))
+      .join(", ");
+    commandCodeSessionFiles = await resolveCommandCodeSessionFiles(process.env);
+  } catch (error) {
+    // Discovery stays strict for sync, but a provider read error must not
+    // suppress the rest of the status diagnostics.
+    commandCodeDiscoveryError = `${error?.code ? `${error.code}: ` : ""}${error?.message || String(error)}`;
+  }
   const commandCodeInstalled = commandCodeSessionFiles.length > 0;
   const lmstudioHome = resolveLmstudioHome(process.env);
   const lmstudioLogFiles = await resolveLmstudioLogFiles(process.env);
@@ -1095,7 +1104,9 @@ async function cmdStatus(argv = []) {
               files: commandCodeSessionFiles.length,
               detail: commandCodeProjectsDir,
             }
-          : { installed: false },
+          : commandCodeDiscoveryError
+            ? { installed: false, error: commandCodeDiscoveryError }
+            : { installed: false },
         lmstudio: lmstudioInstalled
           ? {
               installed: true,
@@ -1304,7 +1315,9 @@ async function cmdStatus(argv = []) {
         : null,
       commandCodeInstalled
         ? `- Command Code: passive reader (${commandCodeSessionFiles.length} session${commandCodeSessionFiles.length !== 1 ? "s" : ""} in ${commandCodeProjectsDir})`
-        : null,
+        : commandCodeDiscoveryError
+          ? `- Command Code: discovery failed (${commandCodeDiscoveryError})`
+          : null,
       lmstudioInstalled
         ? `- LM Studio: passive reader (${lmstudioLogFiles.length} log${lmstudioLogFiles.length !== 1 ? "s" : ""} in ${path.join(lmstudioHome, "server-logs")})`
         : null,

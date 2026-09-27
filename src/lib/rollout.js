@@ -23885,7 +23885,7 @@ async function readCommandCodeSessionSnapshot(filePath, previous = null, headerR
   let handle;
   try {
     handle = await fs.open(filePath, "r");
-    const stat = await handle.stat();
+    let stat = await handle.stat();
     if (!stat.isFile()) return null;
     const metadata = { size: stat.size, mtimeMs: stat.mtimeMs };
     if (
@@ -23917,13 +23917,18 @@ async function readCommandCodeSessionSnapshot(filePath, previous = null, headerR
       }
       // The file changed during the header read. Rebuild through this handle;
       // positional reads above did not advance its full-read file position.
+      stat = finalStat;
     }
     const data = await handle.readFile();
     const finalStat = await handle.stat();
     const finalMetadata = { size: finalStat.size, mtimeMs: finalStat.mtimeMs };
-    // A writer that appended while this handle was being read must be retried
-    // on the next sync instead of acknowledging a tail that was never parsed.
-    if (finalMetadata.size !== data.length) finalMetadata.mtimeMs = -1;
+    // Appends and equal-size rewrites during a full read both need a retry:
+    // old bytes must not be acknowledged under the rewritten file's metadata.
+    if (
+      finalMetadata.size !== data.length ||
+      finalMetadata.size !== stat.size ||
+      finalMetadata.mtimeMs !== stat.mtimeMs
+    ) finalMetadata.mtimeMs = -1;
     return { ...finalMetadata, unchanged: false, text: data.toString("utf8") };
   } catch (error) {
     if (isCommandCodePathMissing(error)) return null;
