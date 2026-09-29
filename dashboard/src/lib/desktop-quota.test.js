@@ -40,6 +40,20 @@ it("normalizes provider durations and preserves model labels", () => {
   expect(quotaPeriodLabel({...rows[0],label:"Sonnet"},"zh-CN")).toBeNull();
 });
 
+it("uses only the duration defined by each provider window spec", () => {
+  const rows = desktopQuotaRows({
+    claude: { configured: true, five_hour: { utilization: 20 } },
+    codex: { configured: true, primary_window: { used_percent: 30, limit_window_seconds: 90000 }, secondary_window: { used_percent: 40 } },
+    opencodeGo: { configured: true, primary_window: { used_percent: 50 } },
+  });
+
+  expect(rows.find(row => row.id === "claude:5h").periodSeconds).toBe(18000);
+  expect(rows.find(row => row.id === "codex:5h").periodSeconds).toBe(90000);
+  expect(rows.find(row => row.id === "codex:7d").periodSeconds).toBeNull();
+  expect(rows.find(row => row.id === "opencodeGo:5h")).toMatchObject({ periodSeconds: null, periodKey: "5h" });
+  expect(quotaPeriodLabel(rows.find(row => row.id === "opencodeGo:5h"), "en")).toBeNull();
+});
+
 it("counts down from actual reset instead of a nominal seven day period", () => {
   const now = Date.parse("2026-09-27T09:01:14.19Z");
   const reset = Date.parse("2026-10-01T15:01:14.19Z");

@@ -37,6 +37,7 @@ internal sealed class PetWindow : Window
     // (windowless hosting throws on init otherwise).
     private readonly WebView2CompositionControl _webView = new() { AllowExternalDrop = false };
     private readonly ServerManager _server;
+    private readonly WidgetWebViewEnvironment _webViewEnvironment;
     private readonly System.Windows.Threading.DispatcherTimer _saveTimer;
     private readonly System.Windows.Threading.DispatcherTimer _hoverTimer;
     private readonly System.Windows.Threading.DispatcherTimer _clickThroughTimer;
@@ -87,9 +88,10 @@ internal sealed class PetWindow : Window
     /// <summary>Raised (on the UI thread) when the user right-clicks the pet — the host shows a context menu.</summary>
     public event Action? ContextMenuRequested;
 
-    public PetWindow(ServerManager server)
+    public PetWindow(ServerManager server, WidgetWebViewEnvironment webViewEnvironment)
     {
         _server = server;
+        _webViewEnvironment = webViewEnvironment;
 
         // Seed the currency from the native cache so the very first push (on page load)
         // already carries the app's last-used unit — no USD flash before the tray's
@@ -252,18 +254,7 @@ internal sealed class PetWindow : Window
     {
         if (_coreReady) return;
 
-        // Own user-data folder (separate from the dashboard's) so the two WebView2
-        // environments never clash over differing creation options.
-        var userDataFolder = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "TokenTracker", "WebView2Pet");
-        Directory.CreateDirectory(userDataFolder);
-
-        // Transparent composition surface; must be set before the browser process starts.
-        // Only alpha 0 (transparent) or 255 are supported.
-        Environment.SetEnvironmentVariable("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "0");
-
-        var env = await CoreWebView2Environment.CreateAsync(null, userDataFolder, null);
+        var env = await _webViewEnvironment.GetAsync();
         await _webView.EnsureCoreWebView2Async(env);
         _coreReady = true;
 

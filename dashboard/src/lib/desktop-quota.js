@@ -1,5 +1,5 @@
 import { PROVIDER_LIMIT_SPECS } from "../ui/dashboard/components/usage-limits-provider-specs.js";
-import { resetToMs } from "./limit-pace.js";
+import { resetToMs, resolveWindowSeconds } from "./limit-pace.js";
 
 /** Use the dashboard's window definitions; never turn missing usage into zero. */
 export function desktopQuotaRows(snapshot) {
@@ -13,8 +13,7 @@ export function desktopQuotaRows(snapshot) {
       rows.push({
         id: `${provider}:${window.key}`, provider,
         labelKey: window.labelKey, label: window.label,
-        periodSeconds: window.window?.[window.windowSecondsField] || window.windowSeconds
-          || (window.key === "5h" ? 18000 : window.key === "7d" ? 604800 : null),
+        periodSeconds: resolveWindowSeconds(window, window.window),
         periodKey: window.key,
         remaining: 100 - Math.max(0, Math.min(100, raw)),
         resetMs: resetToMs(window.window?.[window.resetField || "reset_at"]),

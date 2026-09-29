@@ -652,6 +652,7 @@
   "subscriptions.form.provider_taken": "該工具已有訂閱，請編輯現有記錄",
   "subscriptions.form.provider_taken_suffix": "（已有訂閱）",
   "quota.title": "限額",
+  "quota.percent": "%",
   "quota.remaining": "剩餘",
   "quota.stale": "資料未更新",
   "quota.drag": "拖動調整位置",

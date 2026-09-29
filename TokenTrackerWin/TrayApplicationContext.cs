@@ -19,6 +19,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         ?? System.Windows.Threading.Dispatcher.CurrentDispatcher;
     private readonly NotifyIcon _trayIcon;
     private readonly ServerManager _server = new();
+    private readonly WidgetWebViewEnvironment _widgetWebViewEnvironment = new();
     private readonly UsagePoller _poller;
     private DashboardWindow? _dashboard;
     private PetWindow? _petWindow;
@@ -94,6 +95,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     public TrayApplicationContext(bool showPetOnLaunch = false)
     {
         _poller = new UsagePoller(() => _server.BaseUrl);
+        SystemEvents.UserPreferenceChanged += OnSystemUserPreferenceChanged;
         _menuRenderer = new TrayMenuRenderer(_menuPalette);
 
         _summaryItem = CreateMenuItem("", (_, _) => OpenDashboard());
@@ -242,7 +244,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         // auto-opens. A stored preference (user toggled the pet at least once) always
         // wins; only first launches fall back to the show-on-manual-run default.
         // Deferred onto the dispatcher so it shows once the message pump is running.
-        _quotaWindow = new QuotaWidgetWindow(_server, OpenDashboard);
+        _quotaWindow = new QuotaWidgetWindow(_server, OpenDashboard, _widgetWebViewEnvironment);
         _quotaWindow.EnabledChanged += () => { _quotaItem.Checked = _quotaWindow.Enabled; UpdateLimitsPolling(); };
         _quotaItem.Checked = _quotaWindow.Enabled;
         if (_quotaWindow.Enabled)
@@ -266,7 +268,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void ToggleQuota()
     {
-        _quotaWindow ??= new QuotaWidgetWindow(_server, OpenDashboard);
+        _quotaWindow ??= new QuotaWidgetWindow(_server, OpenDashboard, _widgetWebViewEnvironment);
         _quotaWindow.SetEnabled(!_quotaWindow.Enabled);
         _quotaItem.Checked = _quotaWindow.Enabled;
         if (_lastLimitsJson is not null) _quotaWindow.ApplyLimits(_lastLimitsJson);
@@ -336,7 +338,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _summaryItem.Text = $"{_strings.TodayTitle}: {_strings.NoData}";
         _openDashboardItem.Text = _strings.OpenDashboard;
         _syncItem.Text = _strings.SyncNow;
-        _quotaItem.Text = QuotaWidgetWindow.QuotaMenuText();
+        _quotaItem.Text = _strings.DesktopQuota;
+        _quotaWindow?.ApplyLocale(NativeLocalization.ResolveLocale(_localePreference));
         UpdatePetMenuText();
         _petSizeItem.Text = _strings.PetSize;
         _petSizeSmall.Text = _strings.SizeSmall;
@@ -402,6 +405,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private void ApplyThemePreference(string preference)
     {
         var normalized = NativeTheme.NormalizePreference(preference);
+        _quotaWindow?.ApplyTheme(NativeTheme.ResolveIsLight(normalized));
         var nextPalette = TrayMenuRenderer.PaletteFor(NativeTheme.ResolveIsLight(normalized));
         if (_themePreference == normalized && _menuPalette == nextPalette) return;
 
@@ -417,6 +421,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ? await _dashboard.ReadThemePreferenceAsync()
             : NativeTheme.CurrentPreference;
         ApplyThemePreference(preference);
+    }
+
+    private void OnSystemUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category is not (UserPreferenceCategory.Color or UserPreferenceCategory.General)) return;
+        PostToUi(RefreshThemeFromDashboard);
     }
 
     private async void RefreshLocaleFromDashboard()
@@ -465,7 +475,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private void EnsurePet()
     {
         if (_petWindow is not null) return;
-        _petWindow = new PetWindow(_server);
+        _petWindow = new PetWindow(_server, _widgetWebViewEnvironment);
         // Right-clicking the pet pops a context menu (open dashboard / size / close).
         _petWindow.ContextMenuRequested += () => PostToUi(ShowPetContextMenu);
     }
@@ -1049,6 +1059,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _refreshTimer.Dispose();
             _syncTimer.Dispose();
             _poller.Dispose();
+            SystemEvents.UserPreferenceChanged -= OnSystemUserPreferenceChanged;
             _server.Dispose();
             _trayIcon.Dispose();
             _menu.Dispose();
