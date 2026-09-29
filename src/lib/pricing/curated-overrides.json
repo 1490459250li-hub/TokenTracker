@@ -120,6 +120,27 @@
       "cache_write": 0.167,
       "note": "See hy3-preview-agent."
     },
+    "qwen3.8-flash": {
+      "input": 0.15,
+      "output": 0.47,
+      "cache_read": 0.016,
+      "cache_write": 0.2,
+      "note": "Alibaba Model Studio Singapore (International), USD per MTok, verified 2026-09-29: https://www.alibabacloud.com/help/en/model-studio/qwen3-8-flash . Reference API estimate; other regions/providers can have different rates. Issue #715."
+    },
+    "hy4-preview": {
+      "input": 0.833,
+      "output": 2.5,
+      "cache_read": 0.042,
+      "cache_write": 0.833,
+      "note": "Tencent Hunyuan Hy4 preview (released 2026-08-28; WorkBuddy/CodeBuddy backend). Official TokenHub rate: 6 / 0.3 (cache hit) / 18 RMB per MTok in/read/out, converted at ~7.2 RMB/USD like hy3-preview. No published cache-write price, so cache_write = input. Issue #633."
+    },
+    "hy4-preview-agent": {
+      "input": 0.833,
+      "output": 2.5,
+      "cache_read": 0.042,
+      "cache_write": 0.833,
+      "note": "See hy4-preview. CodeBuddy's auto-router emits the -agent suffixed form."
+    },
     "composer-1": {
       "input": 1.25,
       "output": 10,

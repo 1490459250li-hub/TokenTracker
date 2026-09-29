@@ -71,6 +71,28 @@ test("MODEL_PRICING + getModelPricing are byte-identical across all 5 edge files
   }
 });
 
+test("Qwen3.8 Flash local and all cloud paths share full cache pricing (#715)", () => {
+  const { getModelPricing: localPricing, computeRowCost } = require("../src/lib/pricing");
+  const expected = { input: 0.15, output: 0.47, cache_read: 0.016, cache_write: 0.2 };
+  const variants = ["qwen3.8-flash", "QWEN3.8-FLASH", "qwen3-8-flash", "dashscope/qwen3.8-flash",
+    "qwen_ai_platform/qwen3.8-flash", "openrouter/qwen/qwen3.8-flash", "qwen3.8-flash-2026-09-01"];
+  for (const name of [CANONICAL, ...MIRRORS]) {
+    const { code } = transformSync(extractBlock(name), { loader: "ts", target: "es2020" });
+    const edgePricing = vm.runInNewContext(`${code}\ngetModelPricing;`);
+    for (const model of variants) {
+      const local = localPricing(model);
+      assert.deepEqual(Object.fromEntries(Object.keys(expected).map(key => [key, local[key]])), expected, model);
+      assert.deepEqual(JSON.parse(JSON.stringify(edgePricing(model))), expected, `${name}: ${model}`);
+      const cost = computeRowCost({ model, input_tokens: 1e6, output_tokens: 1e6,
+        cached_input_tokens: 1e6, cache_creation_input_tokens: 1e6 });
+      assert.ok(Math.abs(cost - 0.836) < 1e-12, `${model}: cache cost must not be omitted`);
+    }
+    for (const model of ["qwen3.8-flash-next", "qwen3.8-max", "qwen3.7-flash"]) {
+      assert.notDeepEqual(JSON.parse(JSON.stringify(edgePricing(model))), expected, `${name}: distinct SKU ${model}`);
+    }
+  }
+});
+
 test("canonical pricing block retains regression-prone entries and matcher order", () => {
   const block = extractBlock(CANONICAL);
 
