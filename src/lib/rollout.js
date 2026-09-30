@@ -32,6 +32,8 @@ const {
   buildDevinUsageEvents,
 } = require("./devin-usage");
 const { USD_TICKS_PER_USD, normalizeGrokUsage } = require("./grok-usage");
+const { resolveTraeDbPaths, readTraeUsageRows } = require("./trae-db");
+const { normalizeTraeUsage, normalizeTraeModel, traeTimestamp } = require("./trae-usage");
 
 const DEFAULT_SOURCE = "codex";
 const DEFAULT_MODEL = "unknown";
@@ -18975,12 +18977,13 @@ function mergeGrokUsagePrecision(current, next) {
   return "mixed";
 }
 
-function clearGrokHourlyBuckets(hourlyState) {
+function clearSourceHourlyBuckets(hourlyState, source) {
   if (!hourlyState || typeof hourlyState !== "object") return;
+  const prefix = `${source}${BUCKET_SEPARATOR}`;
   const buckets = hourlyState.buckets && typeof hourlyState.buckets === "object" ? hourlyState.buckets : null;
   if (buckets) {
     for (const key of Object.keys(buckets)) {
-      if (key.startsWith("grok|")) delete buckets[key];
+      if (key.startsWith(prefix)) delete buckets[key];
     }
   }
   const groupQueued =
@@ -18989,12 +18992,12 @@ function clearGrokHourlyBuckets(hourlyState) {
       : null;
   if (groupQueued) {
     for (const key of Object.keys(groupQueued)) {
-      if (key.startsWith("grok|")) delete groupQueued[key];
+      if (key.startsWith(prefix)) delete groupQueued[key];
     }
   }
 }
 
-async function retractStaleGrokQueueRows(queuePath, keepKeys) {
+async function retractStaleSourceQueueRows(queuePath, source, keepKeys) {
   if (!queuePath) return 0;
   let raw = "";
   try {
@@ -19004,7 +19007,7 @@ async function retractStaleGrokQueueRows(queuePath, keepKeys) {
     throw error;
   }
 
-  const latestGrok = new Map();
+  const latestRows = new Map();
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let row;
@@ -19013,21 +19016,21 @@ async function retractStaleGrokQueueRows(queuePath, keepKeys) {
     } catch {
       continue;
     }
-    if ((row?.source || "") !== "grok") continue;
+    if ((row?.source || "") !== source) continue;
     const model = normalizeModelInput(row.model) || DEFAULT_MODEL;
     const hourStart = typeof row.hour_start === "string" ? row.hour_start : null;
     if (!hourStart) continue;
-    latestGrok.set(bucketKey("grok", model, hourStart), { model, hour_start: hourStart, row });
+    latestRows.set(bucketKey(source, model, hourStart), { model, hour_start: hourStart, row });
   }
 
   const zero = initTotals();
   const lines = [];
-  for (const [key, entry] of latestGrok.entries()) {
+  for (const [key, entry] of latestRows.entries()) {
     if (keepKeys.has(key)) continue;
     if (totalsKey(entry.row) === totalsKey(zero)) continue;
     lines.push(
       JSON.stringify({
-        source: "grok",
+        source,
         model: entry.model,
         hour_start: entry.hour_start,
         ...zero,
@@ -19127,7 +19130,7 @@ async function parseGrokBuildIncremental({
         legacySeen: true,
       };
     }
-    clearGrokHourlyBuckets(hourlyState);
+    clearSourceHourlyBuckets(hourlyState, "grok");
   } else {
     sessionSnapshots = normalizeGrokSessionSnapshots(grokState);
   }
@@ -19508,7 +19511,7 @@ async function parseGrokBuildIncremental({
       if (!key.startsWith("grok|") || !bucket?.totals) continue;
       keepKeys.add(key);
     }
-    const retracted = await retractStaleGrokQueueRows(queuePath, keepKeys);
+    const retracted = await retractStaleSourceQueueRows(queuePath, "grok", keepKeys);
     bucketsQueued += retracted;
   }
 
@@ -21000,13 +21003,188 @@ function isCjkCodePoint(code) {
 // ── Trae SOLO (ByteDance AI IDE) ─────────────────────────────────────────────
 // https://www.trae.ai
 //
-// Trae SOLO is scoped to detection (init) + entitlement display (status):
-//   - init: resolveTraeStoragePath() proves an install exists.
-//   - status: readTraeEntitlementFromStorage() serves the plan/limits snapshot.
-// Trae SOLO does NOT expose per-request token usage in a readable local format
-// (session transcripts are SQLCipher-encrypted; memory summaries carry no
-// token counts), so the token-count-only queue is intentionally never written
-// for this provider — the cloud hourly table stays clean.
+// International TRAE usage comes from local encrypted chat_turn metadata.
+//
+// The ledger keeps one compact tuple per turn, keyed by a 128-bit digest, so a
+// correction can retract exactly what the turn contributed even after TRAE
+// deletes its history. total_tokens is the five token columns plus any input
+// without a cache split, which is counted but unpriced (normalizeTraeUsage).
+const TRAE_CURSOR_VERSION = 2;
+const HALF_HOUR_MS = 30 * 60 * 1000;
+const [T_SESSION, T_MODEL, T_BUCKET, T_MODIFIED, T_STORE, T_INPUT, T_CACHED, T_WRITTEN,
+  T_OUTPUT, T_REASONING, T_CONVERSATIONS, T_ESTIMATED, T_UNPRICED] = Array.from({ length: 13 }, (_, i) => i);
+
+function packTraeTurn({ session, model, bucketStart, totals, modifiedAt, store }) {
+  return [session, model, Date.parse(bucketStart) / HALF_HOUR_MS, modifiedAt, store,
+    totals.input_tokens, totals.cached_input_tokens, totals.cache_creation_input_tokens,
+    totals.output_tokens, totals.reasoning_output_tokens, totals.conversation_count,
+    totals.usage_precision === "estimated" ? 1 : 0, totals.unpriced_input_tokens || 0];
+}
+
+function unpackTraeTotals(turn) {
+  const totals = {
+    input_tokens: turn[T_INPUT],
+    cached_input_tokens: turn[T_CACHED],
+    cache_creation_input_tokens: turn[T_WRITTEN],
+    output_tokens: turn[T_OUTPUT],
+    reasoning_output_tokens: turn[T_REASONING],
+    total_tokens: turn[T_INPUT] + turn[T_CACHED] + turn[T_WRITTEN] + turn[T_OUTPUT] + turn[T_REASONING]
+      + turn[T_UNPRICED],
+    conversation_count: turn[T_CONVERSATIONS],
+  };
+  if (turn[T_ESTIMATED]) totals.usage_precision = "estimated";
+  return totals;
+}
+
+function traeTurnBucketStart(turn) {
+  return new Date(turn[T_BUCKET] * HALF_HOUR_MS).toISOString();
+}
+
+async function parseTraeIncremental({
+  dbPaths,
+  cursors,
+  queuePath,
+  env = process.env,
+  onProgress,
+  readUsageRows = readTraeUsageRows,
+} = {}) {
+  const paths = dbPaths || resolveTraeDbPaths(env);
+  const hourlyState = normalizeHourlyState(cursors.hourly);
+  // Queue writes and reads may fail. Publish cursor changes only after the
+  // append succeeds, including copies of the mutable bucket totals.
+  hourlyState.buckets = Object.fromEntries(Object.entries(hourlyState.buckets).map(([key, bucket]) => [
+    key, key.startsWith("trae|") ? { ...bucket, totals: { ...bucket.totals } } : bucket,
+  ]));
+  hourlyState.groupQueued = { ...hourlyState.groupQueued };
+  // A ledger with another TRAE_CURSOR_VERSION cannot retract what it
+  // contributed, so rebuild the TRAE buckets from the stores instead of
+  // adding every turn on top of them.
+  const prior = cursors.trae?.version === TRAE_CURSOR_VERSION ? cursors.trae : null;
+  const rebuilding = !prior && Boolean(cursors.trae);
+  if (rebuilding) clearSourceHourlyBuckets(hourlyState, "trae");
+  const turns = { ...prior?.turns };
+  const databases = { ...prior?.databases };
+  const stores = [...(prior?.stores || [])];
+  const touchedBuckets = new Set();
+  const conversations = new Set(Object.values(turns)
+    .filter((turn) => turn[T_CONVERSATIONS] > 0).map((turn) => turn[T_SESSION]));
+  // 128-bit digests: identifiers are hashed before they are stored.
+  const digest = (value) => crypto.createHash("sha256").update(value).digest().subarray(0, 16).toString("base64url");
+  let recordsProcessed = 0;
+  let eventsAggregated = 0;
+  let recordsSkipped = 0;
+  let estimatedRecords = 0;
+  let unpricedRecords = 0;
+  const errors = [];
+  for (const dbPath of [...new Set(paths)]) {
+    const databaseKey = digest(path.resolve(dbPath));
+    let store = stores.indexOf(databaseKey);
+    if (store < 0) store = stores.push(databaseKey) - 1;
+    let rows;
+    let fingerprint;
+    let finalFingerprint;
+    try {
+      // existsSync also returns false for permission errors. Let stat/read
+      // report inaccessible stores instead of treating them as absent.
+      fssync.statSync(dbPath);
+      fingerprint = devinSqliteFingerprint(dbPath);
+      if (sameSqliteFingerprint(fingerprint, databases[databaseKey])) continue;
+      rows = await readUsageRows(dbPath, { env });
+      finalFingerprint = devinSqliteFingerprint(dbPath);
+    } catch (err) {
+      // One install can be locked, corrupt, or use a different key while
+      // another remains readable. Its prior fingerprint stays retryable;
+      // successful stores still publish together after the queue append.
+      errors.push({ database: dbPath, message: err?.message || String(err) });
+      continue;
+    }
+    for (const row of rows) {
+      recordsProcessed += 1;
+      const totals = normalizeTraeUsage(row.usage, { model: row.model });
+      const timestamp = traeTimestamp(row.created_at);
+      const bucketStart = timestamp && toUtcHalfHourStart(timestamp);
+      const rowId = row.turn_id || row.id;
+      if (!totals || !bucketStart || rowId == null || rowId === "") {
+        recordsSkipped += 1;
+        continue;
+      }
+      const session = digest(String(row.session_id || `${databaseKey}:${rowId}`));
+      // Stable turn ids deduplicate copies across the two international app
+      // stores. Numeric SQLite ids are only unique within their database.
+      const identity = digest(JSON.stringify(row.turn_id
+        ? [session, row.turn_id] : [databaseKey, rowId]));
+      const previous = turns[identity];
+      const modifiedAt = Date.parse(traeTimestamp(row.updated_at) || timestamp);
+      // A copied turn in another install can lag behind the original. Never
+      // let an unrelated rescan of that stale store retract newer usage.
+      // Without a newer timestamp, conflicting copies retain their owner.
+      if (previous && previous[T_STORE] !== store && modifiedAt <= previous[T_MODIFIED]) continue;
+      if (!previous && totals.total_tokens === 0) continue;
+      if (totals.usage_precision === "estimated") estimatedRecords += 1;
+      if (totals.unpriced_input_tokens > 0) unpricedRecords += 1;
+      totals.conversation_count = previous
+        ? previous[T_CONVERSATIONS]
+        : conversations.has(session) ? 0 : 1;
+      conversations.add(session);
+      const model = normalizeTraeModel(row.model);
+      const next = packTraeTurn({ session, model, bucketStart, totals, modifiedAt, store });
+      if (previous && next.every((value, i) => i === T_MODIFIED || i === T_STORE || value === previous[i])) {
+        turns[identity] = next;
+        continue;
+      }
+      if (previous) {
+        const previousBucket = traeTurnBucketStart(previous);
+        const old = getHourlyBucket(hourlyState, "trae", previous[T_MODEL], previousBucket);
+        subtractTotals(old.totals, unpackTraeTotals(previous));
+        touchedBuckets.add(bucketKey("trae", previous[T_MODEL], previousBucket));
+      }
+      const bucket = getHourlyBucket(hourlyState, "trae", model, bucketStart);
+      addTotals(bucket.totals, totals);
+      touchedBuckets.add(bucketKey("trae", model, bucketStart));
+      turns[identity] = next;
+      eventsAggregated += 1;
+    }
+    // A read that races with a writer must be retried on the next sync.
+    databases[databaseKey] = sameSqliteFingerprint(fingerprint, finalFingerprint)
+      ? fingerprint : null;
+    if (typeof onProgress === "function") {
+      onProgress({ recordsProcessed, eventsAggregated, bucketsQueued: touchedBuckets.size });
+    }
+  }
+  // Rebuild precision from the retained contributions, including unchanged
+  // stores. A correction can replace the last estimated turn with reported
+  // usage without changing numeric totals, or move it to another bucket.
+  const bucketPrecisions = new Map();
+  for (const turn of Object.values(turns)) {
+    const key = bucketKey("trae", turn[T_MODEL], traeTurnBucketStart(turn));
+    if (!touchedBuckets.has(key) || unpackTraeTotals(turn).total_tokens === 0) continue;
+    bucketPrecisions.set(key, mergeGrokUsagePrecision(
+      bucketPrecisions.get(key), turn[T_ESTIMATED] ? "estimated" : "reported",
+    ));
+  }
+  for (const key of touchedBuckets) {
+    const precision = bucketPrecisions.get(key);
+    hourlyState.buckets[key].usage_precision = precision === "reported" ? null : precision || null;
+  }
+  // A rebuild is all or nothing. Buckets rebuilt from a subset of the stores
+  // would replace shared buckets with partial totals, and each retry would
+  // append every row again. Keep the old hourly state and ledger instead.
+  if (rebuilding && errors.length) {
+    return { recordsProcessed, eventsAggregated, bucketsQueued: 0, recordsSkipped, estimatedRecords, unpricedRecords, errors };
+  }
+  await ensureDir(path.dirname(queuePath));
+  let bucketsQueued = await enqueueTouchedBuckets({ queuePath, hourlyState, touchedBuckets });
+  cursors.hourly = hourlyState;
+  if (rebuilding) {
+    // The old ledger may have filed a turn under another bucket key (model or
+    // half-hour); retract those rows so the dashboard does not count it twice.
+    const keepKeys = new Set(Object.keys(hourlyState.buckets).filter((key) => key.startsWith("trae|")));
+    bucketsQueued += await retractStaleSourceQueueRows(queuePath, "trae", keepKeys);
+  }
+  cursors.trae = { version: TRAE_CURSOR_VERSION, stores, databases, turns };
+  return { recordsProcessed, eventsAggregated, bucketsQueued, recordsSkipped, estimatedRecords, unpricedRecords, errors };
+}
+
 // Ordered candidate app-dir names. The CN IDE build installs as "Trae CN" on
 // Windows; the international build installs as "TRAE SOLO". Both expose the same
 // iCubeServerData entitlement key, so either is a valid Trae IDE install.
@@ -22868,6 +23046,7 @@ async function parseDshIncremental({ sessionFiles, cursors, queuePath, onProgres
 
 
 module.exports = {
+  parseTraeIncremental,
   listRolloutFiles,
   listRolloutFilesDeep,
   codexSessionIdFromPath,
