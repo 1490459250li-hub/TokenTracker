@@ -115,6 +115,13 @@ const {
 const wsl = require("../lib/wsl-probe");
 const { getWslMode, isInvalidWslMode, shouldProbeWsl, discoverWslHome } = wsl;
 const { resolveInstallPaths, resolveZcodeNativeDbPath, resolveMimoNativeDbPath } = require("../lib/install-resolver");
+const {
+  describeScanRootOrigin,
+  describeScanRootState,
+  hasAnyScanChild,
+  resolveEnvRoot,
+  resolveScanRoots,
+} = require("../lib/scan-roots");
 const { probeGrokHookState, resolveGrokHome } = require("../lib/grok-hook");
 const { probeOmpHookState } = require("../lib/omp-hook");
 
@@ -196,7 +203,9 @@ async function cmdStatus(argv = []) {
   const uploadThrottlePath = path.join(trackerDir, "upload.throttle.json");
   const autoRetryPath = path.join(trackerDir, "auto.retry.json");
   const syncSkipPath = path.join(trackerDir, "sync.skip.json");
-  const codexHome = process.env.CODEX_HOME || path.join(home, ".codex");
+  // Normalized like sync (a relative CODEX_HOME is anchored to home, not cwd)
+  // so status lists exactly the root sync walks.
+  const codexHome = resolveEnvRoot("codex", { env: process.env, home }) || path.join(home, ".codex");
   const codexConfigPath = path.join(codexHome, "config.toml");
   const acodeHome = process.env.TOKENTRACKER_ACODE_HOME || path.join(home, ".acode");
   const acodeConfigPath = path.join(acodeHome, "config.toml");
@@ -228,6 +237,33 @@ async function cmdStatus(argv = []) {
   const geminiHookCommand = buildGeminiHookCommand(notifyPath);
 
   const config = await readJson(configPath);
+  // Extra scan roots (#657): CODEX_HOME / CLAUDE_CONFIG_DIR of this process
+  // plus config.scanRoots, resolved exactly as sync does, so status lists every
+  // root sync walks — this is the output users paste when usage looks wrong.
+  const scanRoots = resolveScanRoots({
+    home,
+    env: process.env,
+    config,
+    base: { codex: [codexHome], claude: [path.join(home, ".claude")] },
+  });
+  const extraScanRoots = [];
+  for (const provider of ["codex", "claude"]) {
+    for (const entry of scanRoots[provider]) {
+      if (entry.origin === "native") continue;
+      extraScanRoots.push({
+        provider,
+        origin: describeScanRootOrigin(entry, provider),
+        path: entry.path,
+        exists: entry.exists,
+        error: entry.error || null,
+      });
+    }
+  }
+  const describeExtraScanRoot = (root) =>
+    `${root.provider} ${root.origin}: ${root.path}${describeScanRootState(root)}`;
+  const scanRootsLine = extraScanRoots.length > 0
+    ? `- Extra scan roots: ${extraScanRoots.map(describeExtraScanRoot).join(" | ")}`
+    : null;
   const { cursors } = await readCursorStateSummary({ trackerDir, cursorsPath });
   const queueState = (await readJson(queueStatePath)) || { offset: 0 };
   const uploadThrottle = normalizeUploadState(
@@ -417,6 +453,10 @@ async function cmdStatus(argv = []) {
       ? wsl.discoverWslHome(".claude")
       : null;
     if (wslClaudeHomeStatus) claudeHomesStatus.push({ dir: wslClaudeHomeStatus, label: "WSL" });
+    for (const entry of scanRoots.claude) {
+      if (entry.origin === "native" || !entry.exists) continue;
+      claudeHomesStatus.push({ dir: entry.path, label: describeScanRootOrigin(entry, "claude") });
+    }
     for (const { dir, label } of claudeHomesStatus) {
       const projects = path.join(dir, "projects");
       try {
@@ -655,7 +695,7 @@ async function cmdStatus(argv = []) {
   // users are asked to paste when Codex usage looks wrong, so it must list
   // every root sync actually walks — and no empty shell sync would skip.
   const codexPaths = resolveInstallPaths({
-    nativeValue: process.env.CODEX_HOME || path.join(home, ".codex"),
+    nativeValue: codexHome,
     wslDir: ".codex",
     requireAnyChild: ["sessions", "archived_sessions"],
     union: true,
@@ -663,6 +703,11 @@ async function cmdStatus(argv = []) {
   // Both children, matching requireAnyChild above: an install holding only
   // archived_sessions/ is counted by sync and must not read as "not detected".
   const codexActive = formatResolvedPaths(codexPaths, ["sessions", "archived_sessions"]);
+  for (const entry of scanRoots.codex) {
+    if (entry.origin === "native" || !entry.exists) continue;
+    if (!hasAnyScanChild(entry.path, ["sessions", "archived_sessions"])) continue;
+    codexActive.push(`${describeScanRootOrigin(entry, "codex")}: ${entry.path}`);
+  }
   const codexInstalledStatus = codexActive.length > 0;
 
   const acodePaths = resolveInstallPaths({
@@ -981,6 +1026,10 @@ async function cmdStatus(argv = []) {
       last_upload_error: lastUploadError || null,
       last_sync_skipped: syncSkip?.at ? syncSkip : null,
       auto_retry: autoRetry || null,
+      // Extra scan roots (#657): CODEX_HOME / CLAUDE_CONFIG_DIR of this process
+      // plus config.scanRoots; `exists` false + `error` null means absent,
+      // `error` set means present but unreadable.
+      extra_scan_roots: extraScanRoots,
       hooks: {
         codex_notify: notifyConfigured,
         acode_notify: acodeConfigured,
@@ -1196,6 +1245,7 @@ async function cmdStatus(argv = []) {
       lastUploadError ? `- Last upload error: ${lastUploadError}` : null,
       syncSkipLine,
       autoRetryLine,
+      scanRootsLine,
       `- Codex notify: ${notifyConfigured ? JSON.stringify(codexNotify) : "unset"}`,
       `- AStudio notify: ${acodeConfigured ? JSON.stringify(acodeNotify) : "unset"}`,
       `- Every Code notify: ${everyCodeConfigured ? JSON.stringify(everyCodeNotify) : "unset"}`,
@@ -1520,6 +1570,11 @@ function renderLightTable(summary) {
 
   for (const [name, state] of Object.entries(summary.hooks || {})) {
     push(`Hook · ${name}`, state ? "set" : "unset");
+  }
+
+  for (const root of summary.extra_scan_roots || []) {
+    const state = root.exists ? "" : (root.error ? ` (unreadable: ${root.error})` : " (missing)");
+    push(`Scan root · ${root.provider}`, `${root.origin}: ${root.path}${state}`);
   }
 
   for (const [name, info] of Object.entries(summary.providers || {})) {

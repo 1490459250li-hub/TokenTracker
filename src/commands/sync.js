@@ -174,6 +174,14 @@ const {
   openCursorStore,
 } = require("../lib/cursor-store");
 const { resolveTrackerPaths } = require("../lib/tracker-paths");
+const {
+  appendUniqueDirs,
+  extraScanRootPaths,
+  hasAnyScanChild,
+  resolveEnvRoot,
+  resolveScanRoots,
+  scanRootDirState,
+} = require("../lib/scan-roots");
 const { resolveRuntimeConfig, isLegacyInsforgeBaseUrl } = require("../lib/runtime-config");
 const { extractTokenCount } = require("../lib/codex-rollout-parser");
 const {
@@ -607,7 +615,24 @@ async function cmdSync(argv, context = {}) {
         persistedAnonKey: config.anonKey,
       };
     }
-    const codexCursorRoots = [process.env.CODEX_HOME || path.join(home, ".codex")];
+    // Scan roots (#657). Every producer — hook-fired sync, native background
+    // refresh, CLI — must derive the SAME root list, and the cursor store's
+    // codexRoots must come from that list: a rollout under a root the store
+    // does not know is filed in core.json instead of its per-day shard, so two
+    // producers with different roots never see each other's cursor and re-parse
+    // the file from byte 0 on every alternation (#639). CODEX_HOME keeps its
+    // existing meaning (replaces ~/.codex for this process) but is normalized
+    // once by resolveEnvRoot — a relative value is anchored to home, not cwd —
+    // and that single value feeds discovery AND the cursor store below.
+    // config.scanRoots adds roots for every process.
+    const codexNativeValue = resolveEnvRoot("codex", { env: process.env, home }) || path.join(home, ".codex");
+    const scanRoots = resolveScanRoots({
+      home,
+      env: process.env,
+      config,
+      base: { codex: [codexNativeValue], claude: [path.join(home, ".claude")] },
+    });
+    const codexCursorRoots = scanRoots.codex.map((entry) => entry.path);
     const cursorStore = await openCursorStore({
       trackerDir,
       cursorsPath,
@@ -649,7 +674,16 @@ async function cmdSync(argv, context = {}) {
       claudeInstallHomes.push(claudeNativeHome);
     }
     if (wslClaudeHome) claudeInstallHomes.push(wslClaudeHome);
-    const claudeProjectsDirs = claudeInstallHomes.map((h) => path.join(h, "projects"));
+    // Extra Claude roots (#657): CLAUDE_CONFIG_DIR of the spawning process and
+    // config.scanRoots.claude, additive to the homes above so coverage does not
+    // depend on which process spawned this sync. Deduped by realpath at the
+    // projects/ level: two profiles may symlink one projects/ dir, and reading
+    // it under both spellings would double-parse every file, leaving
+    // correctness to the bounded claudeHashes layer.
+    const claudeProjectsDirs = appendUniqueDirs(
+      claudeInstallHomes.map((h) => path.join(h, "projects")),
+      extraScanRootPaths(scanRoots.claude).map((h) => path.join(h, "projects")),
+    );
     const xdgDataHome = process.env.XDG_DATA_HOME || path.join(home, ".local", "share");
     const kiloHome = process.env.KILO_HOME || path.join(xdgDataHome, "kilo");
 
@@ -706,7 +740,6 @@ async function cmdSync(argv, context = {}) {
 
     const sources = [];
     if (sourceAllowed("codex")) {
-      const codexNativeValue = process.env.CODEX_HOME || path.join(home, ".codex");
       // resolveInstallPaths stays the single authority for wsl-first /
       // native-first / wsl-only / native-only / both selection; requireAnyChild
       // makes it validate that a candidate actually holds sessions/ or
@@ -744,6 +777,17 @@ async function cmdSync(argv, context = {}) {
         sources.push({ source: "codex", sessionsDir: path.join(codexPaths.wsl, "sessions"), inventoryCacheKey: "codexDayInventoryCache" });
         if (!isBackgroundLightweightSync || backgroundCodexUsageRepair) {
           sources.push({ source: "codex", sessionsDir: path.join(codexPaths.wsl, "archived_sessions"), deep: true });
+        }
+      }
+      // Extra Codex roots (#657) from config.scanRoots.codex. Same populated-
+      // root rule as requireAnyChild above so an empty shell dir is not walked;
+      // the day-inventory cache is keyed by day directory, so sharing it across
+      // roots is safe.
+      for (const extraRoot of extraScanRootPaths(scanRoots.codex)) {
+        if (!hasAnyScanChild(extraRoot, ["sessions", "archived_sessions"])) continue;
+        sources.push({ source: "codex", sessionsDir: path.join(extraRoot, "sessions"), inventoryCacheKey: "codexDayInventoryCache" });
+        if (!isBackgroundLightweightSync || backgroundCodexUsageRepair) {
+          sources.push({ source: "codex", sessionsDir: path.join(extraRoot, "archived_sessions"), deep: true });
         }
       }
     }
@@ -1073,14 +1117,49 @@ async function cmdSync(argv, context = {}) {
     }
     if (isFullSourceScan) {
       await reincludeClaudeMemObserverFiles({ cursors, claudeFiles, queuePath, queueStatePath });
-      await repairClaudeQueueFromGroundTruth({
-        cursors,
-        queuePath,
-        queueStatePath,
-        projectQueuePath,
-        projectQueueStatePath,
-        rootDirs: claudeProjectsDirs,
-      });
+      // The ground-truth repair rebuilds every Claude queue row from the roots
+      // it is given. A configured root that is absent or unreadable right now
+      // (unmounted volume, permissions) may still hold history that an earlier
+      // scoped sync queued, so rebuilding without it would erase that history.
+      // The same applies one level down: listClaudeProjectFiles turns a read
+      // error on projects/ into an empty listing, so an unreadable projects/
+      // would let the repair run against nothing and mark itself complete. An
+      // ABSENT projects/ is fine for a NEW root (a profile with no sessions
+      // yet) but not for one the cursor store shows has supplied files before:
+      // then the directory vanished and rebuilding without it would erase its
+      // history. Defer in both cases: the migration key stays unset and the
+      // repair runs on a later full scan once the root is back. Ordinary
+      // scanning still proceeds.
+      const cursorFilePaths = Object.keys(cursors.files || {});
+      const rootPreviouslySuppliedFiles = (rootPath) => {
+        const prefix = path.join(rootPath, "projects") + path.sep;
+        return cursorFilePaths.some((filePath) => filePath.startsWith(prefix));
+      };
+      const unavailableClaudeRoots = scanRoots.claude
+        .filter((entry) => {
+          if (entry.origin === "native") return false;
+          if (!entry.exists) return true;
+          const projectsState = scanRootDirState(path.join(entry.path, "projects"));
+          if (projectsState.error !== null) return true;
+          return !projectsState.exists && rootPreviouslySuppliedFiles(entry.path);
+        })
+        .map((entry) => entry.path);
+      if (unavailableClaudeRoots.length > 0) {
+        if (!opts.auto) {
+          process.stderr.write(
+            `Claude ground-truth repair deferred: configured scan root(s) unavailable: ${unavailableClaudeRoots.join(", ")}\n`,
+          );
+        }
+      } else {
+        await repairClaudeQueueFromGroundTruth({
+          cursors,
+          queuePath,
+          queueStatePath,
+          projectQueuePath,
+          projectQueueStatePath,
+          rootDirs: claudeProjectsDirs,
+        });
+      }
     }
     let claudeResult = { filesProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
     if (claudeFiles.length > 0) {
