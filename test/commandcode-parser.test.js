@@ -1487,7 +1487,7 @@ test("Command Code retries an equal-size rewrite between a full read and its fin
     assert.deepEqual(commandCodeRows(options.projectQueuePath), [
       lifecycleProjectRow(), lifecycleProjectRow("acme/lifecycle-fixture", corrected),
     ]);
-    assert.deepEqual(Object.keys(options.cursors.commandCode.messages), [`command-code:m2|${T0}`]);
+    assert.deepEqual(Object.keys(options.cursors.commandCode.messages), [`command-code:sess-lifecycle|m2`]);
     const hourlyBytes = fs.readFileSync(options.queuePath);
     const projectBytes = fs.readFileSync(options.projectQueuePath);
     roundTripLifecycleCursors(options);

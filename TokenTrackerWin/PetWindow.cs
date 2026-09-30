@@ -55,6 +55,7 @@ internal sealed class PetWindow : Window
     private string _curSymbol = "$";
     private decimal _curRate = 1m;
     private string _locale = "en";
+    private string _tokenUnitSystem = TokenUnits.Current;
     private bool _syncing;
     private JsonNode? _limits;
     private string _character = CurrentCharacter;
@@ -664,6 +665,14 @@ internal sealed class PetWindow : Window
         PushContext();
     }
 
+    /// <summary>Push the dashboard's token unit system ("chinese" = 万/亿, else K/M/B).</summary>
+    public void ApplyTokenUnitSystem(string unitSystem)
+    {
+        if (_tokenUnitSystem == unitSystem) return;
+        _tokenUnitSystem = unitSystem;
+        PushContext();
+    }
+
     /// <summary>Push whether a sync is in progress (drives the "typing" animation, like macOS).</summary>
     public void ApplySyncing(bool syncing)
     {
@@ -727,6 +736,7 @@ internal sealed class PetWindow : Window
         var sym = System.Text.Json.JsonSerializer.Serialize(_curSymbol);
         var rate = _curRate.ToString(inv);
         var loc = System.Text.Json.JsonSerializer.Serialize(_locale);
+        var unitSystem = System.Text.Json.JsonSerializer.Serialize(_tokenUnitSystem);
         var character = System.Text.Json.JsonSerializer.Serialize(_character);
         var botColor = System.Text.Json.JsonSerializer.Serialize(_botColor);
         // The pet host renders without ThemeProvider, so nothing there can resolve the
@@ -759,6 +769,7 @@ internal sealed class PetWindow : Window
             _ = _webView.CoreWebView2.ExecuteScriptAsync(
                 $"window.__ttPetCurrency={{symbol:{sym},rate:{rate}}};" +
                 $"window.__ttPetLocale={loc};" +
+                $"window.__ttPetTokenUnitSystem={unitSystem};" +
                 $"window.__ttPetCharacter={character};" +
                 $"window.__ttPetBotColor={botColor};" +
                 $"window.__ttPetDark={petDark};" +

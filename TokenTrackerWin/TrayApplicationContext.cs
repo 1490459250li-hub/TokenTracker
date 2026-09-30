@@ -755,6 +755,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 if (launch) LaunchAtStartup.Enable();
                 else LaunchAtStartup.Disable();
                 break;
+            case TokenUnits.SettingKey when value is string unitSystem:
+                // Display-only preference: persist it, then re-render the tray summary
+                // and pet so they pick up 万/亿 vs K/M/B without waiting for a poll.
+                TokenUnits.Store(unitSystem);
+                RefreshSummary();
+                return;
             default:
                 return;
         }
@@ -928,6 +934,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         // (connection state is owned by OnServerStatusChanged).
         _petWindow?.ApplyCurrency(symbol, rate);
         _petWindow?.ApplyLocale(NativeLocalization.ResolveLocale(_localePreference));
+        _petWindow?.ApplyTokenUnitSystem(TokenUnits.Current);
         _petWindow?.ApplyLimits(_lastLimitsJson);
 
         if (_lastStats is not { } s)
@@ -943,7 +950,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var cost = symbol + (s.TodayCostUsd * rate).ToString("0.00", CultureInfo.InvariantCulture);
         var text = s.TodayTokens <= 0
             ? $"{_strings.TodayTitle}: {_strings.NoData}"
-            : $"{_strings.TodayTitle}: {UsagePoller.FormatTokens(s.TodayTokens)} {_strings.TokensUnit} · {cost}";
+            : $"{_strings.TodayTitle}: {UsagePoller.FormatTokens(s.TodayTokens, TokenUnits.UsesChinese)} {_strings.TokensUnit} · {cost}";
 
         _summaryItem.Text = text;
         // The tray-icon tooltip stays the app name (set once in the ctor). The floating

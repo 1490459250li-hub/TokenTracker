@@ -481,12 +481,35 @@ internal sealed class UsagePoller : IDisposable
 
     // ── Formatting (mirrors macOS TokenFormatter.formatCompact + cost) ──
 
-    public static string FormatTokens(long n)
+    public static string FormatTokens(long n, bool chineseUnits)
     {
+        if (chineseUnits) return FormatTokensChinese(n);
         if (n >= 1_000_000_000) return (n / 1_000_000_000d).ToString("0.0", CultureInfo.InvariantCulture) + "B";
         if (n >= 1_000_000) return (n / 1_000_000d).ToString("0.0", CultureInfo.InvariantCulture) + "M";
         if (n >= 1_000) return (n / 1_000d).ToString("0.0", CultureInfo.InvariantCulture) + "K";
         return n.ToString(CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>Mirrors <c>formatChineseNumber</c> in dashboard/src/lib/format.ts: exact digits
+    /// below 1万, then one decimal with a trailing ".0" dropped, carrying into the next unit
+    /// when rounding reaches 10000 (99999999 → "1亿", not "10000万").</summary>
+    public static string FormatTokensChinese(long n)
+    {
+        var sign = n < 0 ? "-" : "";
+        var abs = Math.Abs((double)n);
+        if (abs < 10_000) return sign + Math.Abs((decimal)n).ToString(CultureInfo.InvariantCulture);
+
+        static double Round1(double v) => Math.Round(v, 1, MidpointRounding.AwayFromZero);
+        string Text(double v, string unit) => sign + v.ToString("0.#", CultureInfo.InvariantCulture) + unit;
+
+        if (abs >= 1e12) return Text(Round1(abs / 1e12), "万亿");
+        if (abs >= 1e8)
+        {
+            var yi = Round1(abs / 1e8);
+            return yi >= 10_000 ? Text(Round1(yi / 10_000), "万亿") : Text(yi, "亿");
+        }
+        var wan = Round1(abs / 1e4);
+        return wan >= 10_000 ? Text(Round1(wan / 10_000), "亿") : Text(wan, "万");
     }
 
     public static string FormatCost(decimal usd) =>
