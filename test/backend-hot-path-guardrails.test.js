@@ -49,18 +49,18 @@ test("user-authenticated edge functions verify current RS256 and legacy HS256 to
 test("cloud account reads use the shared cached RPC instead of a device lookup plus aggregation", () => {
   for (const file of ACCOUNT_FUNCTIONS) {
     const source = read(`dashboard/edge-patches/${file}`);
-    assert.match(source, /rpc\("account_usage_grouped_cached"/u,
-      `${file} must use the cross-isolate cached RPC`);
+    assert.match(source, /rpc\("account_[a-z_]+(?:_compact|_wire|_grouped_cached)"/u,
+      `${file} must use its cross-isolate compact RPC`);
     assert.doesNotMatch(
       source,
       /\.from\("tokentracker_devices"\)/u,
       `${file} must not spend a second PostgREST connection resolving devices`,
     );
-    assert.match(source, /const groupedRowsInFlight = new Map/u,
+    assert.match(source, /const (?:compact|groupedRows)InFlight = new Map/u,
       `${file} must coalesce identical concurrent RPC reads`);
-    assert.match(source, /GROUPED_ROWS_TTL_MS = 30_000/u,
+    assert.match(source, /(?:COMPACT|GROUPED_ROWS)_TTL_MS = 30_000/u,
       `${file} must shield the backend from old-client polling storms`);
-    assert.match(source, /GROUPED_ROWS_STALE_IF_ERROR_MS = 5 \* 60_000/u,
+    assert.match(source, /(?:COMPACT|GROUPED_ROWS)_STALE_IF_ERROR_MS = 5 \* 60_000/u,
       `${file} must retain a bounded stale fallback for transient 5xx responses`);
   }
 });

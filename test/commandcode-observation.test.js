@@ -14,7 +14,7 @@ const T0 = "2026-05-01T12:00:00.000Z";
 const TOTALS = {
   input_tokens: 1000, cached_input_tokens: 0, cache_creation_input_tokens: 0,
   output_tokens: 100, reasoning_output_tokens: 0, total_tokens: 1100,
-  billable_total_tokens: 1100, total_cost_usd: 0.42, conversation_count: 1,
+  billable_total_tokens: 1100, total_cost_usd: 0, conversation_count: 1,
 };
 const ROW = { source: "command-code", model: "deepseek-v4.1-flash", hour_start: T0, ...TOTALS };
 const PROJECT_KEY = "acme/synthetic-observation";
@@ -24,7 +24,7 @@ const PROJECT_ROW = {
 };
 const DOUBLE_TOTALS = {
   ...TOTALS, input_tokens: 2000, output_tokens: 200, total_tokens: 2200,
-  billable_total_tokens: 2200, total_cost_usd: 0.84, conversation_count: 2,
+  billable_total_tokens: 2200, total_cost_usd: 0, conversation_count: 2,
 };
 const ZERO_TOTALS = Object.fromEntries(Object.keys(TOTALS).map((key) => [key, 0]));
 
@@ -470,7 +470,7 @@ test("a later project's observation error prevents publishing an earlier file's 
   await rollout.parseCommandCodeIncremental(options);
   const total = {
     ...TOTALS, input_tokens: 3000, output_tokens: 300, total_tokens: 3300,
-    billable_total_tokens: 3300, total_cost_usd: 1.26, conversation_count: 3,
+    billable_total_tokens: 3300, total_cost_usd: 0, conversation_count: 3,
   };
   assert.deepEqual(readRows(options.queuePath), [ROW, { ...ROW, ...total }]);
   assert.deepEqual(readRows(options.projectQueuePath), [PROJECT_ROW, { ...PROJECT_ROW, ...DOUBLE_TOTALS }]);

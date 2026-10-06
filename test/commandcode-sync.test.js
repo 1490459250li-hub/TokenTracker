@@ -16,7 +16,7 @@ const TOTALS = {
   reasoning_output_tokens: 0,
   total_tokens: 1100,
   billable_total_tokens: 1100,
-  total_cost_usd: 0.42,
+  total_cost_usd: 0,
   conversation_count: 1,
 };
 const ROW = {

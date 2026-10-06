@@ -114,7 +114,7 @@ function makeLegacyCommandCodeTree() {
     reasoning_output_tokens: 0,
     total_tokens: 820,
     billable_total_tokens: 820,
-    total_cost_usd: 0.001,
+    total_cost_usd: 0,
     conversation_count: 1,
   };
   const oldQueuedKey = "150|600|50|20|0|820|820|0.001|1";
@@ -314,14 +314,14 @@ test("commandCodeUsageToTotals subtracts cache reads from the cache-inclusive in
     reasoning_output_tokens: 0,
     total_tokens: 37654,
     billable_total_tokens: 37654,
-    total_cost_usd: 0.011206788,
+    total_cost_usd: 0,
     conversation_count: 1,
   });
 
   assert.equal(
-    commandCodeUsageToTotals({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }),
-    null,
-    "all-zero usage is not a billable event",
+    commandCodeUsageToTotals({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }).conversation_count,
+    0,
+    "explicit zero can correct history but is not a new billable event",
   );
   assert.equal(commandCodeUsageToTotals(null), null);
 
@@ -412,12 +412,12 @@ test("extractCommandCodeSessionUsage reads header, model and buckets without mat
 
   assert.equal(parsed.sessionId, "sess-9");
   assert.equal(parsed.cwd, "/home/user/project");
-  assert.equal(parsed.records.length, 2, "zero-usage and torn records are dropped");
+  assert.equal(parsed.records.length, 3, "explicit zero is retained for corrections; torn records are dropped");
   assert.equal(parsed.records[0].bucketStart, "2026-05-01T12:00:00.000Z");
   assert.equal(parsed.records[0].model, "deepseek-v4.1-flash");
-  assert.equal(parsed.records[1].bucketStart, "2026-05-01T12:30:00.000Z");
-  assert.equal(parsed.records[1].model, "gpt-6-sol");
-  assert.equal(parsed.records[1].totals.total_tokens, 550);
+  assert.equal(parsed.records[2].bucketStart, "2026-05-01T12:30:00.000Z");
+  assert.equal(parsed.records[2].model, "gpt-6-sol");
+  assert.equal(parsed.records[2].totals.total_tokens, 550);
 });
 
 test("parseCommandCodeIncremental queues the committed fixture, skips unchanged files, and dedups on rerun", async () => {
@@ -443,7 +443,7 @@ test("parseCommandCodeIncremental queues the committed fixture, skips unchanged 
   assert.equal(rows[0].output_tokens, 14736 + 122 + 232 + 1073 + 587 + 165);
   // The provider-reported bill is authoritative for this source.
   const expectedCost = 0.011206788 + 0.0046470719999999995 + 0.00041216399999999997 + 0.0032349539999999995 + 0.000546828 + 0.000360948;
-  assert.ok(Math.abs(rows[0].total_cost_usd - expectedCost) < 1e-12);
+  assert.equal(rows[0].total_cost_usd, 0);
 
   // Second run: (size, mtime) unchanged, so the transcript is not re-read and
   // nothing is re-queued.
@@ -600,10 +600,10 @@ test("parseCommandCodeIncremental keeps mixed-model cache accounting disjoint an
         reasoning_output_tokens: 0,
         total_tokens: fixture.total,
         billable_total_tokens: fixture.total,
-        total_cost_usd: fixture.costUsd,
+        total_cost_usd: 0,
         conversation_count: 1,
       }, fixture.id);
-      assert.equal(computeRowCost(row), fixture.costUsd, `${fixture.id} keeps the provider-reported bill`);
+      assert.equal(computeRowCost(row), computeRowCost({ ...row, total_cost_usd: 0 }));
     }
 
     const second = await parseCommandCodeIncremental({
@@ -650,8 +650,8 @@ test("parseCommandCodeIncremental reconciles a rewritten transcript (resume/comp
     // The dropped record's bucket reconciles back to zero instead of being
     // double counted or left behind.
     assertBucket(buckets.get("deepseek-v4.1-flash|2026-05-01T12:00:00.000Z"), 0, 0, 0);
-    assertBucket(buckets.get("deepseek-v4.1-flash|2026-05-01T12:30:00.000Z"), 2000, 2200, 0.002);
-    assertBucket(buckets.get("deepseek-v4.1-flash|2026-05-01T13:00:00.000Z"), 3000, 3300, 0.003);
+    assertBucket(buckets.get("deepseek-v4.1-flash|2026-05-01T12:30:00.000Z"), 2000, 2200, 0);
+    assertBucket(buckets.get("deepseek-v4.1-flash|2026-05-01T13:00:00.000Z"), 3000, 3300, 0);
 
     assert.equal(
       latestCommandCodeTokens(queuePath),
@@ -808,7 +808,7 @@ const LIFECYCLE_TOTALS = {
   reasoning_output_tokens: 0,
   total_tokens: 1100,
   billable_total_tokens: 1100,
-  total_cost_usd: 0.42,
+  total_cost_usd: 0,
   conversation_count: 1,
 };
 const LIFECYCLE_ROW = {
@@ -987,7 +987,7 @@ test("Command Code restores a differing duplicate when the winning transcript is
     await parseCommandCodeIncremental(options);
     const winningTotals = {
       ...LIFECYCLE_TOTALS, input_tokens: 2000, output_tokens: 200,
-      total_tokens: 2200, billable_total_tokens: 2200, total_cost_usd: 0.84,
+      total_tokens: 2200, billable_total_tokens: 2200, total_cost_usd: 0,
     };
     assert.deepEqual(commandCodeRows(options.queuePath), [{ ...LIFECYCLE_ROW, ...winningTotals }]);
     roundTripLifecycleCursors(options);
@@ -1050,7 +1050,7 @@ for (const [operation, code] of [
       const recoveredTotals = {
         ...LIFECYCLE_TOTALS, input_tokens: 2000, output_tokens: 200,
         total_tokens: 2200, billable_total_tokens: 2200,
-        total_cost_usd: 0.84, conversation_count: 2,
+        total_cost_usd: 0, conversation_count: 2,
       };
       assert.deepEqual(commandCodeRows(options.queuePath), [LIFECYCLE_ROW, { ...LIFECYCLE_ROW, ...recoveredTotals }]);
       assert.deepEqual(commandCodeRows(options.projectQueuePath), [
@@ -1282,7 +1282,7 @@ test("Command Code preserves both roots when one discovery fails and recovers pe
     await sync();
     const bothTotals = {
       ...LIFECYCLE_TOTALS, input_tokens: 2000, output_tokens: 200,
-      total_tokens: 2200, billable_total_tokens: 2200, total_cost_usd: 0.84, conversation_count: 2,
+      total_tokens: 2200, billable_total_tokens: 2200, total_cost_usd: 0, conversation_count: 2,
     };
     assert.deepEqual(commandCodeRows(options.queuePath), [{ ...LIFECYCLE_ROW, ...bothTotals }]);
     const before = JSON.parse(JSON.stringify(options.cursors));
@@ -1302,7 +1302,7 @@ test("Command Code preserves both roots when one discovery fails and recovers pe
     await sync();
     const recoveredTotals = {
       ...LIFECYCLE_TOTALS, input_tokens: 3000, output_tokens: 300,
-      total_tokens: 3300, billable_total_tokens: 3300, total_cost_usd: 1.26, conversation_count: 3,
+      total_tokens: 3300, billable_total_tokens: 3300, total_cost_usd: 0, conversation_count: 3,
     };
     assert.deepEqual(commandCodeRows(options.queuePath), [
       { ...LIFECYCLE_ROW, ...bothTotals }, { ...LIFECYCLE_ROW, ...recoveredTotals },
@@ -1424,7 +1424,7 @@ test("Command Code rebuilds a transcript that changes during its cached header r
     assert.equal(changed.recordsProcessed, 2);
     const recoveredTotals = {
       ...LIFECYCLE_TOTALS, input_tokens: 2000, output_tokens: 200,
-      total_tokens: 2200, billable_total_tokens: 2200, total_cost_usd: 0.84, conversation_count: 2,
+      total_tokens: 2200, billable_total_tokens: 2200, total_cost_usd: 0, conversation_count: 2,
     };
     assert.deepEqual(commandCodeRows(options.queuePath), [LIFECYCLE_ROW, { ...LIFECYCLE_ROW, ...recoveredTotals }]);
     assert.deepEqual(commandCodeRows(options.projectQueuePath), [lifecycleProjectRow(), lifecycleProjectRow("acme/lifecycle-fixture", recoveredTotals)]);
@@ -1479,7 +1479,7 @@ test("Command Code retries an equal-size rewrite between a full read and its fin
     const recovered = await parseCommandCodeIncremental(options);
     const corrected = {
       ...LIFECYCLE_TOTALS, input_tokens: 2000, output_tokens: 200,
-      total_tokens: 2200, billable_total_tokens: 2200, total_cost_usd: 0.84,
+      total_tokens: 2200, billable_total_tokens: 2200, total_cost_usd: 0,
     };
     assert.equal(commandCodeRows(options.queuePath).at(-1).total_tokens, 2200);
     assert.equal(recovered.recordsProcessed, 1, "an ordinary subsequent sync must reread the unstable snapshot");

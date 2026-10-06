@@ -55,10 +55,10 @@ const LOCAL_INFERENCE_SOURCES = new Set(["lmstudio"]);
 // a larger context window; only observed request subsets receive the premium.
 const OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272_000;
 // Prefer the cost recorded with each request for these CLI sources rather than
-// replacing it with TokenTracker's model-table estimate. Command Code records
-// costUsd even for models without a public rate table (see issue #630).
-// Cline is retained alongside them from this fork's merged baseline.
-const SOURCES_WITH_AUTHORITATIVE_COST = new Set(["grok", "cline", "command-code"]);
+// replacing it with TokenTracker's model-table estimate. Command Code's
+// `costUsd` is a display-rate estimate, not a billed amount, so it is excluded
+// here and estimated from the shared model price table instead.
+const SOURCES_WITH_AUTHORITATIVE_COST = new Set(["grok", "cline"]);
 
 const SEED_SNAPSHOT_PATH = path.resolve(__dirname, "seed-snapshot.json");
 const DEEPSEEK_TIME_PRICED_MODELS = [

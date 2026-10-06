@@ -23599,9 +23599,9 @@ async function parseDshIncremental({ sessionFiles, cursors, queuePath, onProgres
 //  1. AI SDK-normalized `inputTokens` ALREADY INCLUDES cache reads and writes.
 //     `uncached = inputTokens - cacheReadTokens - cacheWriteTokens`; keeping
 //     either cache category in input double counts it in `total_tokens`.
-//  2. `costUsd` is the request cost reported by Command Code. Local readers
-//     prefer positive recorded values (SOURCES_WITH_AUTHORITATIVE_COST in
-//     pricing/index.js) to model-table estimates; this is not bill verification.
+//  2. `costUsd` is Command Code's display-rate estimate, not a billed amount.
+//     Ignore it and emit the zero cost sentinel; local readers and cloud
+//     endpoints estimate cost from the shared model price table.
 //
 // Transcripts are append-only in practice, but a resume/compaction REWRITES the
 // file, so byte offsets are the wrong cursor shape here. This reader rebuilds a
@@ -23722,9 +23722,11 @@ function normalizeCommandCodeModelName(value) {
 
 // Map Command Code's usage object onto disjoint queue columns. `inputTokens`
 // already includes cache reads and writes (see the section comment), so subtract
-// both back out first; returns null for an all-zero record. `costUsd` is the
-// CLI-recorded cost; zero keeps the repository-wide "unreported" sentinel
-// and falls through to model pricing on the read side.
+// both back out first. `costUsd` is a display-rate estimate, not a billed
+// amount, so it is ignored: `total_cost_usd` stays at the repository-wide
+// "unreported" sentinel and readers estimate cost from the model price table.
+// An explicit numeric zero still corrects an earlier observation; an empty
+// placeholder does not assert usage.
 function commandCodeUsageToTotals(usage) {
   if (!usage || typeof usage !== "object") return null;
   const inclusiveInput = toNonNegativeInt(usage.inputTokens);
@@ -23732,9 +23734,13 @@ function commandCodeUsageToTotals(usage) {
   const cacheWrite = toNonNegativeInt(usage.cacheWriteTokens);
   const output = toNonNegativeInt(usage.outputTokens);
   const input = Math.max(0, inclusiveInput - cachedInput - cacheWrite);
-  if (input === 0 && cachedInput === 0 && cacheWrite === 0 && output === 0) return null;
   const total = input + cachedInput + cacheWrite + output;
-  const reportedCost = Number(usage.costUsd);
+  const explicitZero = ["inputTokens", "outputTokens"].every((field) =>
+    typeof usage[field] === "number" && Number.isFinite(usage[field]) && usage[field] === 0,
+  ) && ["cacheReadTokens", "cacheWriteTokens"].every((field) =>
+    usage[field] === undefined || (typeof usage[field] === "number" && usage[field] === 0),
+  );
+  if (total === 0 && !explicitZero) return null;
   return {
     input_tokens: input,
     cached_input_tokens: cachedInput,
@@ -23743,8 +23749,8 @@ function commandCodeUsageToTotals(usage) {
     reasoning_output_tokens: 0,
     total_tokens: total,
     billable_total_tokens: total,
-    total_cost_usd: Number.isFinite(reportedCost) && reportedCost > 0 ? reportedCost : 0,
-    conversation_count: 1,
+    total_cost_usd: 0,
+    conversation_count: total > 0 ? 1 : 0,
   };
 }
 

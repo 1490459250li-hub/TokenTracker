@@ -31,12 +31,25 @@ const MIRRORS = [
 ];
 
 const MODEL_API_CALL_SITES = [
-  ["tokentracker-account-daily.ts", /const mdl = String\(row\.model \|\| "unknown"\);/],
+  // account-daily folds per-model totals in Postgres (account_daily_compact),
+  // same as account-heatmap below: the call site to pin is the one copying
+  // Postgres' model keys through untouched.
+  [
+    "tokentracker-account-daily.ts",
+    /for \(const name of Object\.keys\(models\)\) mdl\[name\] = Number\(models\[name\]\) \|\| 0;/,
+  ],
   ["tokentracker-account-model-breakdown.ts", /model: mdl, model_id: mdl/],
   ["tokentracker-leaderboard-profile.ts", /favoriteModel = \{ model_name: model, total_tokens: tokens \};/],
   ["tokentracker-account-hourly.ts", /const mdl = String\(row\.model \|\| "unknown"\);/],
   ["tokentracker-account-monthly.ts", /const mdl = String\(row\.model \|\| "unknown"\);/],
-  ["tokentracker-account-heatmap.ts", /const mdl = String\(row\.model \|\| "unknown"\);/],
+  // account-heatmap folds per-model totals in Postgres (account_heatmap_compact),
+  // so there is no per-row String(row.model) here any more. The call site to pin
+  // is the one that copies Postgres' model keys through untouched — that is what
+  // would break if someone reintroduced display-name mapping on the edge.
+  [
+    "tokentracker-account-heatmap.ts",
+    /for \(const name of Object\.keys\(models\)\) mdl\[name\] = Number\(models\[name\]\) \|\| 0;/,
+  ],
 ];
 
 const BLOCK_RE =
@@ -283,7 +296,7 @@ test("all cloud cost paths only prefer provider-reported costs for authoritative
     assert.ok(source.includes("reportedCost"), `${name}: reported cost branch missing`);
     assert.match(
       source,
-      /const SOURCES_WITH_AUTHORITATIVE_COST = new Set\(\["grok", "command-code"\]\);/,
+      /const SOURCES_WITH_AUTHORITATIVE_COST = new Set\(\["grok", "cline"\]\);/,
       `${name}: authoritative cost sources must be explicitly allowlisted`,
     );
     assert.match(
@@ -293,6 +306,47 @@ test("all cloud cost paths only prefer provider-reported costs for authoritative
     );
   }
 });
+
+for (const name of [CANONICAL, ...MIRRORS]) {
+  test(`Command Code model-table estimates agree locally and in ${name}`, () => {
+    const source = readEdge(name);
+    const allowlist = source.match(/const SOURCES_WITH_AUTHORITATIVE_COST = new Set\([^;]+\);/);
+    assert.ok(allowlist, `${name}: cost source allowlist exists`);
+    let costFunction = source.match(/\nfunction computeRowCost\([\s\S]*?\n\}/)?.[0];
+    if (!costFunction) {
+      assert.equal(name, "tokentracker-account-model-breakdown.ts");
+      const costBlock = source.match(/    const unslothUnpriced = src === "unsloth"[\s\S]*?1_000_000;/);
+      assert.ok(costBlock, "model breakdown per-row cost block exists");
+      costFunction = `function computeRowCost(row) {
+        const src = row.source || "unknown";
+        const mdl = String(row.model || "unknown").trim() || "unknown";
+        const ma = { totalCostUsd: 0 };
+        ${costBlock[0]}
+        return ma.totalCostUsd;
+      }`;
+    }
+    const { code } = transformSync([
+      allowlist[0], extractBlock(name), extractRowPricing(name), costFunction,
+    ].join("\n"), { loader: "ts", target: "es2020" });
+    const edgeCost = vm.runInNewContext(`${code}\ncomputeRowCost;`);
+    const { computeRowCost: localCost } = require("../src/lib/pricing");
+    for (const [model, expected] of [
+      ["claude-sonnet-4-6", 0.0009675],
+      ["glm-4.7-flash", 0],
+      ["zzzz-fixture-unknown-123xyz", 0],
+    ]) {
+      for (const total_cost_usd of [999, 0, undefined]) {
+        const row = {
+          source: "command-code", model, input_tokens: 100, output_tokens: 20,
+          cached_input_tokens: 600, cache_creation_input_tokens: 50, reasoning_output_tokens: 0,
+          total_cost_usd,
+        };
+        assert.equal(edgeCost(row), expected, `${name}: ${model} ignores CLI display estimates`);
+        assert.equal(localCost(row), expected, `local: ${model} matches edge pricing`);
+      }
+    }
+  });
+}
 
 test("all cloud cost paths keep Cline :free models at zero", () => {
   for (const name of [CANONICAL, ...MIRRORS]) {
