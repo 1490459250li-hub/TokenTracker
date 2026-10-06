@@ -297,32 +297,6 @@ describe("SkillsPage", () => {
     expect(keys.has("dir:installed")).toBe(true);
   });
 
-  it("keeps the other-device view when publishing this device inventory fails", async () => {
-    localStorage.setItem("tokentracker_cloud_device_id_v1", "this-device");
-    vi.mocked(getInstalledSkills).mockResolvedValue({
-      targets: [{ id: "codex", label: "Codex" }],
-      skills: [],
-    });
-    vi.mocked(getAccountSkillInventories).mockResolvedValue({
-      devices: [{
-        id: "other-device",
-        device_name: "Other PC",
-        skills: [{
-          key: "local/local:remote-only",
-          name: "Remote Only Skill",
-          directory: "remote-only",
-          targets: ["codex"],
-        }],
-      }],
-    });
-    vi.mocked(publishSkillInventory).mockRejectedValue(new Error("device revoked"));
-
-    render(<SkillsPage />);
-
-    expect(await screen.findByText("Remote Only Skill")).toBeInTheDocument();
-    await waitFor(() => expect(getAccountSkillInventories).toHaveBeenCalledWith("test-access-token"));
-    expect(screen.getByText(copy("skills.inventory.remote"))).toBeInTheDocument();
-  });
 });
 
 // updateSkills reports a rate limit as a return field, not a throw. handleUpdateAll

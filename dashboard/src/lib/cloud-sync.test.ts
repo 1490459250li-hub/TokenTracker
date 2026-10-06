@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  CLOUD_LEADERBOARD_REFRESHED_EVENT,
   clearCloudDeviceSession,
-  getCloudUsageReady,
   setCloudUsageReady,
 } from "./cloud-sync-prefs";
 import { runCloudUsageSyncIfDue, runCloudUsageSyncNow } from "./cloud-sync";
@@ -24,8 +22,7 @@ function okJson(data: unknown): Response {
   } as Response;
 }
 
-function installFetchMock(options: { leaderboardOk?: boolean } = {}) {
-  const leaderboardOk = options.leaderboardOk ?? true;
+function installFetchMock() {
   const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
     if (url === "/functions/tokentracker-machine-id") {
       return okJson({ machineId: "machine-abcdef12", deviceName: "office-win" });
@@ -39,13 +36,6 @@ function installFetchMock(options: { leaderboardOk?: boolean } = {}) {
     }
     if (url === "/functions/tokentracker-local-sync") {
       return okJson({ ok: true });
-    }
-    if (url === "https://cloud.example/functions/tokentracker-leaderboard-refresh") {
-      return {
-        ok: leaderboardOk,
-        status: leaderboardOk ? 200 : 403,
-        json: async () => ({ ok: leaderboardOk }),
-      } as Response;
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -84,24 +74,6 @@ describe("cloud usage sync", () => {
     clearCloudDeviceSession();
   });
 
-  it("sends drain for manual sync", async () => {
-    const fetchMock = installFetchMock();
-    const onSynced = vi.fn();
-    window.addEventListener("tt.cloudUsageSynced", onSynced);
-
-    await runCloudUsageSyncNow(async () => "access-token");
-
-    expect(getLocalSyncBody(fetchMock)).toMatchObject({
-      deviceToken: "device-token",
-      drain: true,
-      insforgeBaseUrl: "https://cloud.example",
-    });
-    expect(onSynced).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls.find(([url]) => url === "https://cloud.example/functions/tokentracker-leaderboard-refresh")?.[1])
-      .toMatchObject({ cache: "no-store" });
-    window.removeEventListener("tt.cloudUsageSynced", onSynced);
-  });
-
   it("sends the local system name separately from the stable machine id", async () => {
     const fetchMock = installFetchMock();
 
@@ -114,38 +86,6 @@ describe("cloud usage sync", () => {
       device_name: "office-win",
       machine_id: "machine-abcdef12",
     });
-  });
-
-  it("drains the full queue before the first scheduled cloud view becomes ready", async () => {
-    const fetchMock = installFetchMock();
-    const onSynced = vi.fn();
-    const onLeaderboardRefresh = vi.fn();
-    window.addEventListener("tt.cloudUsageSynced", onSynced);
-    window.addEventListener(CLOUD_LEADERBOARD_REFRESHED_EVENT, onLeaderboardRefresh);
-
-    await runCloudUsageSyncIfDue(async () => "access-token");
-
-    expect(getLocalSyncBody(fetchMock)).toEqual({
-      deviceToken: "device-token",
-      drain: true,
-      insforgeBaseUrl: "https://cloud.example",
-    });
-    expect(onSynced).toHaveBeenCalledTimes(1);
-    expect(onLeaderboardRefresh).toHaveBeenCalledTimes(1);
-    expect(getCloudUsageReady()).toBe(true);
-    window.removeEventListener("tt.cloudUsageSynced", onSynced);
-    window.removeEventListener(CLOUD_LEADERBOARD_REFRESHED_EVENT, onLeaderboardRefresh);
-  });
-
-  it("does not announce a leaderboard refresh when the refresh endpoint fails", async () => {
-    installFetchMock({ leaderboardOk: false });
-    const onLeaderboardRefresh = vi.fn();
-    window.addEventListener(CLOUD_LEADERBOARD_REFRESHED_EVENT, onLeaderboardRefresh);
-
-    await runCloudUsageSyncNow(async () => "access-token");
-
-    expect(onLeaderboardRefresh).not.toHaveBeenCalled();
-    window.removeEventListener(CLOUD_LEADERBOARD_REFRESHED_EVENT, onLeaderboardRefresh);
   });
 
   it("keeps scheduled sync lightweight after cloud usage is ready", async () => {

@@ -4,18 +4,13 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
-import {
-  preloadDashboardPageResources,
-  preloadLeaderboardDefaultState,
-} from "./lib/dashboard-preload.js";
+import { preloadDashboardPageResources } from "./lib/dashboard-preload.js";
 
 const TEXT = {
   dashboard: "Dashboard page",
   device: "Device page",
   ipCheck: "IP check",
   landing: "Landing page",
-  leaderboard: "Leaderboard page",
-  leaderboardNav: "Leaderboard nav",
   limits: "Limits page",
   limitsNav: "Limits nav",
   login: "Login page",
@@ -53,7 +48,6 @@ vi.mock("./lib/dashboard-preload.js", () => ({
   ),
   markDashboardMainContentVisible: vi.fn(),
   preloadDashboardPageResources: vi.fn(() => pending),
-  preloadLeaderboardDefaultState: vi.fn(() => pending),
 }));
 
 vi.mock("./hooks/useLocale.js", () => ({
@@ -109,7 +103,6 @@ vi.mock("./ui/components/Sidebar.jsx", async () => {
       <div>
         <nav>
           <Link to="/limits">{TEXT.limitsNav}</Link>
-          <Link to="/leaderboard">{TEXT.leaderboardNav}</Link>
         </nav>
         {children}
       </div>
@@ -134,10 +127,6 @@ vi.mock("./pages/DashboardPage.jsx", () => ({
 
 vi.mock("./pages/LimitsPage.jsx", () => ({
   LimitsPage: () => <main>{TEXT.limits}</main>,
-}));
-
-vi.mock("./pages/LeaderboardPage.jsx", () => ({
-  LeaderboardPage: () => <main>{TEXT.leaderboard}</main>,
 }));
 
 vi.mock("./pages/NativeAuthCallbackPage.jsx", () => ({
@@ -169,7 +158,6 @@ async function startPendingPreload(user) {
   await user.click(screen.getByRole("button", { name: TEXT.reveal }));
   await waitFor(() => {
     expect(preloadDashboardPageResources).toHaveBeenCalledTimes(1);
-    expect(preloadLeaderboardDefaultState).toHaveBeenCalledTimes(1);
   });
 }
 
@@ -188,16 +176,5 @@ describe("App navigation while preload is pending", () => {
     });
 
     expect(await screen.findByText(TEXT.limits)).toBeInTheDocument();
-  });
-
-  it("switches to /leaderboard without waiting for pending preload promises", async () => {
-    const user = userEvent.setup();
-    await startPendingPreload(user);
-
-    await act(async () => {
-      await user.click(screen.getByRole("link", { name: TEXT.leaderboardNav }));
-    });
-
-    expect(await screen.findByText(TEXT.leaderboard)).toBeInTheDocument();
   });
 });

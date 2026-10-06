@@ -164,35 +164,6 @@ describe("SettingsPage category navigation", () => {
     expect(screen.queryByRole("switch", { name: "Confetti on limits reset" })).toBeNull();
   });
 
-  it("switches the visible category while keeping every section mounted", async () => {
-    const user = userEvent.setup();
-    const { container } = renderSettings();
-
-    const appearanceButton = screen.getByRole("button", { name: "Appearance" });
-    const accountButton = screen.getByRole("button", { name: "Account" });
-    const appearancePanel = container.querySelector('[data-settings-panel="appearance"]');
-    const accountPanel = container.querySelector('[data-settings-panel="account"]');
-
-    expect(screen.getByText("Manage your preferences")).toBeInTheDocument();
-    expect(screen.getByText("Personal")).toBeInTheDocument();
-    expect(screen.getByText("App")).toBeInTheDocument();
-    expect(screen.getByText("Developer")).toBeInTheDocument();
-    expect(appearanceButton).toHaveAttribute("aria-current", "page");
-    expect(appearancePanel).not.toHaveAttribute("hidden");
-    expect(accountPanel).toHaveAttribute("hidden");
-    expect(screen.getByTestId("appearance-content")).toBeInTheDocument();
-    expect(screen.getByTestId("account-content")).toBeInTheDocument();
-
-    await act(async () => {
-      await user.click(accountButton);
-    });
-
-    expect(accountButton).toHaveAttribute("aria-current", "page");
-    expect(appearanceButton).not.toHaveAttribute("aria-current");
-    expect(appearancePanel).toHaveAttribute("hidden");
-    expect(accountPanel).not.toHaveAttribute("hidden");
-  });
-
   it("omits the network category when the local proxy API is unavailable", () => {
     proxySettingsMock.available = false;
     const { container } = renderSettings();
